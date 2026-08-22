@@ -1,89 +1,79 @@
 # Getting Started
 
-[English](getting-started.md) · [简体中文](getting-started.zh.md)
+English · [简体中文](getting-started.zh.md)
 
-This guide installs DSH Product Subagent Console into a DeepSeek Harness Web profile and enables subagent activity for a new conversation.
+This guide installs DSH Product Subagent Console and enables its Runtime, Plan, and Compare views in a DeepSeek Harness conversation.
 
-## Before you begin
-
-You need:
+## Requirements
 
 - DeepSeek Harness `0.1.1-rc.2`
 - Node.js `^22.19.0` or `>=24.0.0`
 - A working DSH Web profile
 
-The console can display native DSH child sessions without an external Provider. Install a Provider only when you want to delegate to that product.
+Install a compatible Provider Bundle only when a delegated task or plan uses that external coding Agent.
 
-## Install the console
+## Install
 
 Download the `.tgz` archive and `SHA256SUMS.txt` from the matching [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases).
 
-Verify the archive before installation:
+Verify and install the archive:
 
 ```sh
 sha256sum --check SHA256SUMS.txt
-```
-
-Install the archive into the Web profile:
-
-```sh
-dsh plugin --profile web add ./dsh-product-subagent-console-0.1.0-alpha.2.tgz
+dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.1.tgz
 dsh --profile web --dump-config
 ```
 
 The configuration output should contain `product-subagent-console`. Restart the Web profile after installation.
 
-On Windows PowerShell, you can compare the archive hash with the value in `SHA256SUMS.txt`:
+On Windows PowerShell, compare the following result with `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\dsh-product-subagent-console-0.1.0-alpha.2.tgz -Algorithm SHA256
+Get-FileHash .\dsh-product-subagent-console-0.4.0-alpha.1.tgz -Algorithm SHA256
 ```
 
 ## Add an external Provider
 
-Install only the Provider you use, keeping it on the same DSH version family:
+Keep every Provider on the same supported DSH version family. For example:
 
 ```sh
 dsh plugin --profile web add @deepseek-ai/dsh-subagent-codex@0.1.1-rc.2
 dsh plugin --profile web add @deepseek-ai/dsh-subagent-claude-code@0.1.1-rc.2
 ```
 
-Complete the Provider's normal authentication and configuration, then restart the Web profile. Installing this console does not install or authenticate an external coding Agent.
+Complete that Provider's normal authentication and configuration, then restart the Web profile. Installing this console does not install or authenticate an external coding Agent.
 
-## Enable delegation in a preset
+## Configure an Agent Preset
 
-1. Open **Settings → Agent Presets**.
-2. Copy a preset and edit the copy.
-3. Enable the official `@deepseek-ai/dsh-tool-subagent` entry for the selected Provider.
-4. Save the preset.
-5. Create a new conversation with the updated preset.
+Open **Settings → Agent Presets**, copy a preset, and add only the tools you need.
 
-Existing conversations keep the preset generation with which they were created.
+### Observe regular delegated tasks
 
-## Use the canvas
+Enable the official delegation tool for the selected Provider. Tasks started through compatible DSH delegation appear in **Subagents → Runtime**.
 
-Start a delegated task, then open the **Subagents** tab beside Chat and Trajectory.
+### Design and execute plans
 
-- Drag empty space to pan and use the mouse wheel to zoom.
-- Drag a card to adjust the current layout.
-- Use the toolbar to fit the view or restore automatic layout.
-- Click a card to open its details.
-- For native child sessions, use the details action to open the child conversation.
-
-## Optional plugin-owned tool
-
-The console also provides an optional delegation tool. Add it to a copied Agent Preset only when you want to initiate Provider tasks through this plugin:
+Add the plugin's planner tool:
 
 ```yaml
-- id: console-codex
-  name: dsh-product-subagent-console/tool
+- id: agent-planner
+  name: dsh-product-subagent-console/plan-tool
   config:
-    provider: codex
-    toolName: console_codex
-    enableRunInBackground: false
+    toolName: design_subagent_plan
+    executeToolName: execute_subagent_plan
 ```
 
-`provider` must match an installed Provider name. Keep every `toolName` unique within the preset, then create a new conversation after saving it.
+Save the preset and create a new conversation with it. Existing conversations keep the preset version with which they were created.
+
+## Use the workbench
+
+The **Subagents** tab has three modes:
+
+- **Runtime** shows current and completed delegated runs. Pan, zoom, rearrange cards, select a card for details, or open a native child conversation.
+- **Plan** generates or manually creates an Agent plan. Edit the draft, save it, run preflight, review warnings, and approve the exact revision you want to run.
+- **Compare** starts an approved plan and shows each planned task beside its actual attempt. You can inspect status and timing or request cancellation while the execution is active.
+
+Plans and execution history are temporary for the current Host run. See [Agent Planner](agent-planner.md) for the complete plan workflow.
 
 ## Update
 
@@ -97,4 +87,4 @@ dsh plugin --profile web remove dsh-product-subagent-console
 
 Restart the Web profile after removal.
 
-For common setup problems, see [Troubleshooting](troubleshooting.md).
+For common setup and execution problems, see [Troubleshooting](troubleshooting.md).

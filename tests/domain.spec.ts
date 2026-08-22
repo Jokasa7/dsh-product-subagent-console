@@ -119,6 +119,25 @@ describe('ProductSubagentLedger', () => {
     expect(ledger.snapshot(['parent']).attempts).toHaveLength(1)
   })
 
+  it('relabels only the exact published parent and child without changing lifecycle facts', () => {
+    const ledger = new ProductSubagentLedger({ historyLimit: 50, maxObservedActive: 8 })
+    ledger.publish(observed, startInfo({ local: true }))
+    const before = ledger.snapshot(['parent'])
+
+    expect(ledger.relabelPublishedRun('other-parent', 'child-1', 'Wrong parent')).toBe(false)
+    expect(ledger.relabelPublishedRun('parent', 'other-child', 'Wrong child')).toBe(false)
+    expect(ledger.relabelPublishedRun('parent', 'child-1', 'Review API contract')).toBe(true)
+
+    const after = ledger.snapshot(['parent'])
+    expect(after.revision).toBe(before.revision + 1)
+    expect(after.runs[0]).toMatchObject({
+      label: 'Review API contract',
+      state: 'active',
+      providerName: 'codex-safe',
+      childId: 'child-1',
+    })
+  })
+
   it('reports active-record truncation instead of presenting an apparently complete canvas', () => {
     const ledger = new ProductSubagentLedger({ historyLimit: 50, maxObservedActive: 1 })
     expect(ledger.publish(observed, startInfo())).toBe(true)

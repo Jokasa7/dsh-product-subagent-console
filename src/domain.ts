@@ -228,6 +228,21 @@ export class ProductSubagentLedger {
     return true
   }
 
+  /** Apply an exact, display-only task title to one already published child run. */
+  relabelPublishedRun(parentSessionId: string, childId: string, label: string): boolean {
+    const bounded = boundedOptional(label, MAX_LABEL_LENGTH)
+    if (bounded === undefined) return false
+    const run = [...this.runs.values()]
+      .filter(candidate => candidate.parentSessionId === parentSessionId && candidate.childId === childId)
+      .sort((left, right) => right.startedAt - left.startedAt)[0]
+    if (run === undefined) return false
+    if (run.label !== bounded) {
+      this.runs.set(run.runId, { ...run, label: bounded })
+      this.changed()
+    }
+    return true
+  }
+
   /** Settle one previously observed official run without retaining its output. */
   settle(info: SubagentRunEndInfo): void {
     const run = this.runs.get(String(info.runId))

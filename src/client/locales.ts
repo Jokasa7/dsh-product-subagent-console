@@ -3,7 +3,17 @@ export const NS = 'productSubagents'
 
 /** Simplified Chinese workbench copy. */
 export const zh = {
+  'locale.code': 'zh',
   tab: '子代理',
+  'workbench.mode.label': '子代理工作台模式',
+  'workbench.mode.runtime': '运行',
+  'workbench.mode.planner': '方案',
+  'workbench.mode.compare': '对照',
+  'workbench.compare.loadingTitle': '正在接入计划与实际运行',
+  'workbench.compare.loadingBody': '批准并执行方案后，可在这里查看每个计划任务对应的真实运行节点。',
+  'workbench.compare.errorTitle': '暂时无法读取执行记录',
+  'workbench.compare.errorBody': '插件 Host 连接已中断，请重试。',
+  'workbench.compare.stale': '部分对照数据暂时无法更新；当前内容可能不是最新状态。',
   title: '子代理任务画板',
   summary: '拖动查看当前对话中的委派任务、真实状态与父子分支。',
   'summary.count': '{total} 个委派 · {live} 个活动中',
@@ -90,7 +100,17 @@ export type ProductSubagentsLocaleKey = keyof typeof zh
 
 /** English workbench copy with key parity to the Chinese dictionary. */
 export const en: Record<ProductSubagentsLocaleKey, string> = {
+  'locale.code': 'en',
   tab: 'Subagents',
+  'workbench.mode.label': 'Subagent workbench mode',
+  'workbench.mode.runtime': 'Runtime',
+  'workbench.mode.planner': 'Plan',
+  'workbench.mode.compare': 'Compare',
+  'workbench.compare.loadingTitle': 'Connecting plans to actual runs',
+  'workbench.compare.loadingBody': 'After an approved plan runs, each planned task is matched to its factual run here.',
+  'workbench.compare.errorTitle': 'Execution history is temporarily unavailable',
+  'workbench.compare.errorBody': 'The plugin Host connection was interrupted. Try again.',
+  'workbench.compare.stale': 'Some comparison data could not refresh and may be stale.',
   title: 'Subagent task canvas',
   summary: 'Drag through delegated tasks, factual states, and parent-child branches in this conversation.',
   'summary.count': '{total} delegations · {live} active',

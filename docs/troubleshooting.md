@@ -1,55 +1,78 @@
 # Troubleshooting
 
-[English](troubleshooting.md) · [简体中文](troubleshooting.zh.md)
+English · [简体中文](troubleshooting.zh.md)
 
 ## The Subagents tab is missing
 
-- Confirm that the plugin is installed in the Web profile, not only another profile.
+- Confirm that the plugin is installed in the Web profile.
 - Run `dsh --profile web --dump-config` and look for `product-subagent-console`.
-- Confirm that DSH and the plugin use the supported version family.
+- Align DSH, the plugin, and Provider Bundles to the supported version family.
 - Restart the Web profile and refresh the page.
 
-## The tab is visible but the canvas is empty
+## Runtime is empty
 
-- Confirm that the selected Agent Preset enables a delegation tool.
+- Confirm that the selected Agent Preset enables a compatible delegation tool.
 - Create a new conversation after changing a preset.
-- Start a delegated task in that new conversation.
+- Start a delegated task in that conversation.
+
+## Agent Planner is unavailable
+
+- Add `dsh-product-subagent-console/plan-tool` to the selected Agent Preset.
+- Keep `design_subagent_plan` and `execute_subagent_plan` as different, unique tool names.
+- Save the preset and create a new conversation.
+
+See [Agent Planner](agent-planner.md#enable-the-planner) for the complete entry.
+
+## Generate plan does not create a draft
+
+- Check Chat and Trajectory for the visible plan-design request and its tool call.
+- Confirm that the current model can call tools and that the planner tool is enabled in this conversation.
+- Retry with a concrete objective that names the desired result and constraints.
+
+## Preflight blocks approval
+
+Select each reported issue in the Plan view and correct the referenced role or task. Common causes include:
+
+- a cycle or missing task dependency;
+- an unavailable transport Provider, model route, Agent Preset, or tool;
+- multiple transport Providers in one executable Workflow plan;
+- Agent Teams selected as the execution backend;
+- concurrency, budget, or resource conflicts.
+
+Warnings must be reviewed and accepted before approval. Editing the draft requires a new save and preflight.
+
+## An approved plan does not execute
+
+- Confirm that the exact approved revision is selected in Compare.
+- Run preflight again if the DSH profile, Provider, tools, or presets changed after approval.
+- Confirm that the selected Provider is installed, authenticated, and available.
+- Check Chat, Trajectory, and Provider logs for the reported error.
 
 ## An external Agent does not start
 
 - Confirm that its Provider Bundle is installed in the same profile.
-- Complete the Provider's authentication and configuration.
+- Complete the Provider's normal authentication and configuration.
 - Keep the Provider, DSH, and this plugin on compatible versions.
-- Check Trajectory and the Provider logs for the reported error.
+- Check Trajectory and Provider logs for the reported error.
 
-## The optional plugin tool is missing
+## A run stays active longer than expected
 
-- Confirm that `provider` matches the installed Provider name.
-- Give the tool a unique `toolName` within the Agent Preset.
-- Save the preset and create a new conversation.
+Open Trajectory and check the Provider process or logs. If the Provider is no longer responsive, stop it through its normal control path. Restart the Web profile only if the lifecycle does not recover.
 
-## A task remains “Running” longer than expected
+## Cancellation stays pending
 
-Open Trajectory and check the Provider process or Provider logs. The card remains active while DSH reports that run as active. If the Provider is no longer responsive, stop it through its normal control path, then restart the Web profile if the lifecycle does not recover.
+Cancellation is a request to the active Workflow and Provider. The execution remains active until DSH reports that its tasks have settled. Check Trajectory and Provider logs if the state does not change.
 
-## The Host is unavailable or the page disconnects
+## The page disconnects
 
-Restore or restart the Web profile, then refresh the page. Re-run `dsh --profile web --dump-config` if the plugin does not reconnect.
-
-## “Background jobs unavailable” appears
-
-Set `enableRunInBackground: false` in the optional tool configuration, or install the compatible DSH Jobs runtime before enabling background execution.
-
-## “Queue full” appears
-
-Wait for an active task to finish before starting another one. If this is a regular workload, review the console limits in the DSH plugin configuration.
+Restore or restart the Web profile, then refresh the page. Run `dsh --profile web --dump-config` again if the plugin does not reconnect.
 
 ## Version or peer dependency errors appear
 
-Align the plugin, Provider Bundles, and all DSH packages to the exact supported version family. Do not mix this release with a later moving prerelease tag.
+Align the plugin, Provider Bundles, and all DSH packages to the exact supported version family. Do not mix the release with a later moving prerelease tag.
 
-## History or card positions disappear after restart
+## Plans, execution history, or card positions disappear
 
-This release does not persist completed task history or manually adjusted card positions across Host or page restarts.
+Plans and execution history are temporary for the current Host run. Manually adjusted card positions are local to the current page and are not restored after a page restart.
 
-If the problem remains reproducible, open a [GitHub Issue](https://github.com/Jokasa7/dsh-product-subagent-console/issues) with the DSH version, plugin version, Provider name, browser, and the visible error. Remove credentials and private task content before posting.
+If a problem remains reproducible, open a [GitHub Issue](https://github.com/Jokasa7/dsh-product-subagent-console/issues) with the DSH version, plugin version, Provider name, browser, and visible error. Remove credentials and private task content before posting.

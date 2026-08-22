@@ -175,6 +175,82 @@ function motionDuration(): number {
     : 240
 }
 
+function topologyKey(topology: readonly WorkbenchCanvasTopologyNode[]): string {
+  return topology.map(node => [
+    node.id,
+    node.parentId ?? '',
+    node.kind,
+    node.hasChildren ? '1' : '0',
+    String(node.level),
+    String(node.positionInSet),
+    String(node.setSize),
+  ].join('\u0001')).join('\u0000')
+}
+
+function sameContent(left: SubagentCanvasContent, right: SubagentCanvasContent): boolean {
+  return left.kind === right.kind
+    && left.title === right.title
+    && left.label === right.label
+    && left.meta === right.meta
+    && left.status === right.status
+    && left.duration === right.duration
+    && left.state === right.state
+    && left.dotState === right.dotState
+    && left.ariaLabel === right.ariaLabel
+}
+
+function sameTopology(
+  left: WorkbenchCanvasTopologyNode,
+  right: WorkbenchCanvasTopologyNode,
+): boolean {
+  return left.id === right.id
+    && left.parentId === right.parentId
+    && left.workbenchKey === right.workbenchKey
+    && left.kind === right.kind
+    && left.hasChildren === right.hasChildren
+    && left.level === right.level
+    && left.positionInSet === right.positionInSet
+    && left.setSize === right.setSize
+}
+
+function samePosition(
+  left: { readonly x: number; readonly y: number },
+  right: { readonly x: number; readonly y: number },
+): boolean {
+  return left.x === right.x && left.y === right.y
+}
+
+/** Keep unchanged React Flow node objects stable so one duration tick does not redraw the graph. */
+function mergeCanvasNodes(
+  previous: readonly CanvasNode[],
+  baseline: readonly CanvasNode[],
+  positions: ReadonlyMap<string, { readonly x: number; readonly y: number }>,
+): CanvasNode[] {
+  const previousById = new Map(previous.map(node => [node.id, node] as const))
+  return baseline.map((candidate) => {
+    const nextPosition = positions.get(candidate.id) ?? candidate.position
+    const next = samePosition(candidate.position, nextPosition)
+      ? candidate
+      : { ...candidate, position: nextPosition }
+    const current = previousById.get(candidate.id)
+    if (
+      current !== undefined
+      && current.type === next.type
+      && current.draggable === next.draggable
+      && current.selectable === next.selectable
+      && current.selected === next.selected
+      && current.width === next.width
+      && current.height === next.height
+      && samePosition(current.position, next.position)
+      && sameTopology(current.data.topology, next.data.topology)
+      && sameContent(current.data.content, next.data.content)
+      && current.ariaLabel === next.ariaLabel
+      && current.domAttributes?.['aria-expanded'] === next.domAttributes?.['aria-expanded']
+    ) return current
+    return next
+  })
+}
+
 /**
  * Render a draggable task tree whose positions never mutate delegation facts.
  * @param props - canonical topology, display-safe labels, selection, and local controls.
@@ -183,7 +259,13 @@ function motionDuration(): number {
 function SubagentTaskCanvasInner({
   topology, content, selectedKey, expandedKey, copy, onSelect,
 }: SubagentTaskCanvasProps): ReactNode {
-  const autoLayout = useMemo(() => layoutWorkbenchCanvas(topology), [topology])
+  const topologyIdentity = topologyKey(topology)
+  const autoLayout = useMemo(
+    () => layoutWorkbenchCanvas(topology),
+    // topologyIdentity contains every layout-relevant topology field.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [topologyIdentity],
+  )
   const baselineNodes = useMemo(
     () => flowNodes(topology, autoLayout, content, selectedKey, expandedKey),
     [autoLayout, content, expandedKey, selectedKey, topology],
@@ -199,8 +281,8 @@ function SubagentTaskCanvasInner({
   const instance = useRef<ReactFlowInstance<CanvasNode, CanvasEdge> | null>(null)
   const offsets = useRef(new Map<string, WorkbenchCanvasOffset>())
   const previousTopology = useRef('')
+  const measuredTopology = useRef(new Map<string, string>())
   const viewportTouched = useRef(false)
-  const topologyIdentity = useMemo(() => topology.map(node => node.id).join('\u0000'), [topology])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const recordOffset = (id: string, position: { readonly x: number; readonly y: number }): void => {
@@ -231,16 +313,21 @@ function SubagentTaskCanvasInner({
     }
     const placed = applyWorkbenchCanvasOffsets(autoLayout, offsets.current)
     const positions = new Map(placed.map(node => [node.id, node.position] as const))
-    setNodes(baselineNodes.map(node => ({
-      ...node,
-      position: positions.get(node.id) ?? node.position,
-    })))
+    setNodes(previous => mergeCanvasNodes(previous, baselineNodes, positions))
     setLayoutChanged(offsets.current.size > 0)
   }, [autoLayout, baselineNodes, setNodes])
 
   useEffect(() => {
     if (topologyIdentity.length === 0 || typeof window.DOMMatrixReadOnly !== 'function') return
-    const ids = topologyIdentity.split('\u0000')
+    const nextMeasured = new Map(topology.map(node => [
+      node.id,
+      `${node.kind}:${node.hasChildren ? '1' : '0'}`,
+    ] as const))
+    const ids = topology
+      .filter(node => measuredTopology.current.get(node.id) !== nextMeasured.get(node.id))
+      .map(node => node.id)
+    measuredTopology.current = nextMeasured
+    if (ids.length === 0) return
     let frame = requestAnimationFrame(() => {
       updateNodeInternals(ids)
       // React Flow measures newly mounted handles asynchronously. A second
@@ -249,7 +336,7 @@ function SubagentTaskCanvasInner({
       frame = requestAnimationFrame(() => { updateNodeInternals(ids) })
     })
     return () => { cancelAnimationFrame(frame) }
-  }, [topologyIdentity, updateNodeInternals])
+  }, [topology, topologyIdentity, updateNodeInternals])
 
   useEffect(() => {
     if (!flowReady || topology.length === 0) return
@@ -327,6 +414,7 @@ function SubagentTaskCanvasInner({
         onNodeDrag={(_event, node) => { recordOffset(node.id, node.position) }}
         onNodeDragStop={(_event, node) => { recordOffset(node.id, node.position) }}
         nodesConnectable={false}
+        onlyRenderVisibleElements
         edgesReconnectable={false}
         nodesDraggable
         edgesFocusable={false}
@@ -369,18 +457,20 @@ function SubagentTaskCanvasInner({
             <IconRefreshOutline14 />
           </ControlButton>
         </Controls>
-        <MiniMap<CanvasNode>
-          className={css.minimap ?? ''}
-          position="bottom-right"
-          pannable
-          zoomable
-          ariaLabel={copy.minimap}
-          nodeBorderRadius={8}
-          nodeColor={node => node.data.content.state === 'active'
-            ? 'var(--dsw-alias-state-business-primary)'
-            : 'var(--dsw-alias-bg-module-platform)'}
-          maskColor="color-mix(in srgb, var(--dsw-alias-bg-layer-1) 72%, transparent)"
-        />
+        {topology.length > 200 ? null : (
+          <MiniMap<CanvasNode>
+            className={css.minimap ?? ''}
+            position="bottom-right"
+            pannable
+            zoomable
+            ariaLabel={copy.minimap}
+            nodeBorderRadius={8}
+            nodeColor={node => node.data.content.state === 'active'
+              ? 'var(--dsw-alias-state-business-primary)'
+              : 'var(--dsw-alias-bg-module-platform)'}
+            maskColor="color-mix(in srgb, var(--dsw-alias-bg-layer-1) 72%, transparent)"
+          />
+        )}
         <div className={css.canvasNotice} data-layout-changed={layoutChanged || undefined}>
           <span>{copy.interactionHint}</span>
           <span>{copy.localLayoutNotice}</span>

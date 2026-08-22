@@ -107,6 +107,8 @@ const nodeConfig: UserConfig = {
     index: 'src/index.ts',
     tool: 'src/tool.ts',
     invariant: 'src/invariant.ts',
+    planner: 'src/planner.ts',
+    'plan-tool': 'src/plan-tool.ts',
     types: 'src/types.ts',
   },
   outDir: 'lib',

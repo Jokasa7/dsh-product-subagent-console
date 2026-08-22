@@ -120,12 +120,20 @@ describe('workbench model', () => {
       ['native', 'session:grandchild'],
       ['product', 'run:external'],
     ])
+    expect(childNode?.label).toBe('Native child')
     expect(flattenWorkbenchTree(tree).map(node => node.key)).toEqual([
       'attempt:bcba3947-9cf5-4375-8594-77221806ae20',
       'session:child',
       'session:grandchild',
       'run:external',
     ])
+  })
+
+  it('uses an exact observed task label for a deduplicated native child', () => {
+    const labeled = snapshot()
+    labeled.runs[0] = { ...labeled.runs[0]!, label: 'Review API contract' }
+    const tree = buildWorkbenchTree({ rootSessionId: root, catalogs, summaries, snapshot: labeled })
+    expect(tree.find(node => node.kind === 'native')?.label).toBe('Review API contract')
   })
 
   it('keeps the visual key stable when an owned attempt publishes', () => {

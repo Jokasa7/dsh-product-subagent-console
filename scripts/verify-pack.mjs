@@ -69,16 +69,41 @@ if (normalized.some(path => path === '' || path.startsWith('/') || path.includes
   throw new Error('tarball contains a non-canonical path')
 }
 
+// Every relative runtime import in the packed JavaScript must remain inside the
+// tarball. This catches generated shared chunks that are present in lib/ after
+// build but accidentally omitted by package.json's files allowlist.
+const packedPaths = new Set(normalized)
+for (const importerPath of normalized.filter(path => /^lib\/.*\.m?js$/.test(path))) {
+  const source = readFileSync(resolve(root, importerPath), 'utf8')
+  for (const [, specifier] of source.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)["']([^"']+)["']/g)) {
+    if (specifier === undefined || !specifier.startsWith('.')) continue
+    const importer = resolve(root, importerPath)
+    const candidate = resolve(dirname(importer), specifier)
+    const candidates = [candidate, `${candidate}.js`, `${candidate}.mjs`, resolve(candidate, 'index.js')]
+    const target = candidates.find(file => {
+      const path = relative(root, file).replaceAll('\\', '/')
+      return packedPaths.has(path)
+    })
+    if (target === undefined) {
+      throw new Error(`tarball omits runtime import ${specifier} from ${importerPath}`)
+    }
+  }
+}
+
 const required = [
   'package.json',
   'lib/index.js',
   'lib/tool.js',
   'lib/invariant.js',
+  'lib/planner.js',
+  'lib/plan-tool.js',
   'lib/types.js',
   'lib/client.js',
   'lib/types/index.d.ts',
   'lib/types/tool.d.ts',
   'lib/types/invariant.d.ts',
+  'lib/types/planner.d.ts',
+  'lib/types/plan-tool.d.ts',
   'lib/types/types.d.ts',
   'lib/types/client/index.d.ts',
   'cordis.patch.yml',
@@ -88,6 +113,8 @@ const required = [
   'SECURITY.md',
   'docs/getting-started.md',
   'docs/getting-started.zh.md',
+  'docs/agent-planner.md',
+  'docs/agent-planner.zh.md',
   'docs/troubleshooting.md',
   'docs/troubleshooting.zh.md',
   'docs/assets/subagent-canvas-live.jpg',
@@ -119,7 +146,7 @@ for (const path of normalized) {
   const allowed = allowedRootFiles.has(path)
     || path.startsWith('lib/')
     || path === 'docs/assets/subagent-canvas-live.jpg'
-    || /^(?:docs\/(?:getting-started|troubleshooting)(?:\.zh)?\.md)$/.test(path)
+    || /^(?:docs\/(?:agent-planner|getting-started|troubleshooting)(?:\.zh)?\.md)$/.test(path)
   if (!allowed) throw new Error(`tarball contains a non-publishable path: ${path}`)
   if (path.endsWith('.map')) throw new Error(`tarball contains a source map: ${path}`)
   if (/(?:^|\/)(?:\.env(?:\.|$)|src|tests?|scripts|node_modules)(?:\/|$)/i.test(path)) {

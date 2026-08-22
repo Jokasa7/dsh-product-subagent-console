@@ -1,3 +1,12 @@
+# Web profiles move the ordinary Workflow tool into Agent Presets. The planner
+# still needs one Host-plane engine so an approved plan can execute and be
+# observed independently of whichever preset owns the parent conversation.
+- id: workflow-worker-thread
+  name: '@deepseek-ai/dsh-workflow-worker-thread'
+  disabled: false
+  config:
+    provider: spawn
+
 - insert:
     - id: product-subagent-console
       name: dsh-product-subagent-console

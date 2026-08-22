@@ -110,8 +110,19 @@ export const listSessionsRequestSchema = z.object({
 }).strict()
 export type ListSessionsRequest = z.infer<typeof listSessionsRequestSchema>
 
+/** Revision-aware wait request used to receive the next bounded snapshot. */
+export const watchSessionsRequestSchema = listSessionsRequestSchema.extend({
+  hostInstanceId: z.string().uuid().optional(),
+  afterRevision: z.number().int().nonnegative(),
+  timeoutMs: z.number().int().min(1_000).max(30_000).default(25_000),
+}).strict()
+export type WatchSessionsRequest = z.infer<typeof watchSessionsRequestSchema>
+
 /** Dedicated loopback RPC channel for the browser console. */
 export const PRODUCT_SUBAGENT_CONSOLE_CHANNEL = '/product-subagent-console'
 
 /** Read-only endpoint returning a bounded session-filtered snapshot. */
 export const LIST_SESSIONS_ENDPOINT = 'list-sessions'
+
+/** Long-poll endpoint returning after a ledger change or bounded timeout. */
+export const WATCH_SESSIONS_ENDPOINT = 'watch-sessions'

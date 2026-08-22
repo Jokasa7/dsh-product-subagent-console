@@ -1,10 +1,38 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode,
+} from 'react'
 import type { SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
 import {
   IconBranchOutline16, IconCloseOutline16, IconRefreshOutline14, type StateDotState,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConsoleSnapshot, OwnedAttemptOutcome } from '../types.js'
+import type {
+  CancelPlanExecutionRequest,
+  CancelPlanExecutionResult,
+  ExecutionCapabilitySnapshot,
+  PlanExecutionRepositorySnapshot,
+  PlanRepositorySnapshot,
+  PlanRevisionRequest,
+} from '../plan-types.js'
+import {
+  AGENT_PLAN_WORKBENCH_COPY_EN,
+  AGENT_PLAN_WORKBENCH_COPY_ZH,
+  AgentPlanWorkbench, type AgentPlanWorkbenchInjected,
+} from './AgentPlanWorkbench.js'
+import {
+  AGENT_PLAN_COMPARISON_COPY_EN,
+  AGENT_PLAN_COMPARISON_COPY_ZH,
+  AgentPlanComparison,
+} from './AgentPlanComparison.js'
+import {
+  AGENT_PLAN_CANVAS_COPY_EN,
+  AGENT_PLAN_CANVAS_COPY_ZH,
+} from './AgentPlanCanvas.js'
+import {
+  PLAN_COMPARISON_CANVAS_COPY_EN,
+  PLAN_COMPARISON_CANVAS_COPY_ZH,
+} from './AgentPlanComparisonCanvas.js'
 import {
   SubagentTaskCanvas, type SubagentCanvasContent, type SubagentCanvasCopy,
 } from './SubagentTaskCanvas.js'
@@ -22,28 +50,76 @@ export interface SubagentWorkbenchInjected {
     parentSessionIds: readonly SessionId[],
     signal: AbortSignal,
   ) => Promise<ConsoleSnapshot>
+  readonly watchSessions: (
+    parentSessionIds: readonly SessionId[],
+    hostInstanceId: string,
+    afterRevision: number,
+    signal: AbortSignal,
+  ) => Promise<ConsoleSnapshot>
   readonly openChild: (address: SubagentAddress) => void
   readonly refreshNative: (parentSessionId: SessionId) => Promise<void>
 }
 
-/** Standard conversation-view props plus this plugin's read-only actions. */
-export type SubagentWorkbenchProps = PropsRuntime<'conversation.view'>
+/** Plan execution actions supplied by the browser entry. */
+export interface PlanExecutionWorkbenchInjected extends AgentPlanWorkbenchInjected {
+  readonly getExecutionCapabilities: (
+    parentSessionId: SessionId,
+    signal: AbortSignal,
+  ) => Promise<ExecutionCapabilitySnapshot>
+  readonly listPlanExecutions: (
+    parentSessionIds: readonly SessionId[],
+    signal: AbortSignal,
+  ) => Promise<PlanExecutionRepositorySnapshot>
+  readonly watchPlanExecutions: (
+    parentSessionIds: readonly SessionId[],
+    hostInstanceId: string | undefined,
+    afterRevision: number,
+    signal: AbortSignal,
+  ) => Promise<PlanExecutionRepositorySnapshot>
+  readonly cancelPlanExecution: (
+    request: CancelPlanExecutionRequest,
+    signal: AbortSignal,
+  ) => Promise<CancelPlanExecutionResult>
+  readonly requestPlanExecution: (
+    parentSessionId: SessionId,
+    request: PlanRevisionRequest,
+    signal: AbortSignal,
+  ) => Promise<void>
+}
+
+export type ProductSubagentWorkbenchInjected = SubagentWorkbenchInjected
+  & PlanExecutionWorkbenchInjected
+
+type RuntimeWorkbenchProps = PropsRuntime<'conversation.view'>
   & PropsLocale<'productSubagents'>
   & InjectFace<SubagentWorkbenchInjected>
+
+/** Standard conversation-view props plus all three workbench mode actions. */
+export type SubagentWorkbenchProps = PropsRuntime<'conversation.view'>
+  & PropsLocale<'productSubagents'>
+  & InjectFace<ProductSubagentWorkbenchInjected>
 
 type SnapshotState = {
   readonly status: 'loading' | 'ready' | 'error'
   readonly snapshot?: ConsoleSnapshot
 }
 
+type ComparisonSnapshotState = {
+  readonly plans?: PlanRepositorySnapshot
+  readonly executions?: PlanExecutionRepositorySnapshot
+  readonly planError: boolean
+  readonly executionError: boolean
+}
+
 function stateDot(node: WorkbenchNode): StateDotState {
   if (node.state === 'active' || node.state === 'queued' || node.state === 'starting') return 'ongoing'
-  if (node.state === 'completed' || node.state === 'inactive') return 'done'
+  if (node.state === 'completed') return 'done'
   if (
     node.state === 'aborted'
     || node.state === 'refusal'
     || node.state === 'max-tokens'
     || node.state === 'unknown'
+    || node.state === 'inactive'
     || (node.kind === 'product-attempt' && node.attempt.cancellationRequested === true)
   ) return 'warning'
   return 'error'
@@ -236,10 +312,10 @@ function NativeDetails({ node, now, t }: {
   )
 }
 
-/** Render the third conversation tab as a read-only, draggable delegation canvas. */
-export function SubagentWorkbenchView({
-  sessionId, useSessions, listSessions, openChild, refreshNative, t,
-}: SubagentWorkbenchProps): ReactNode {
+/** Render factual native and observed delegation state for the runtime mode. */
+function RuntimeWorkbenchView({
+  sessionId, useSessions, listSessions, watchSessions, openChild, refreshNative, t,
+}: RuntimeWorkbenchProps): ReactNode {
   const catalogs = useSessions(snapshot => snapshot.subagentsByParent)
   const summaries = useSessions(snapshot => snapshot.byId)
   const parentIds = useMemo(
@@ -268,18 +344,20 @@ export function SubagentWorkbenchView({
     }
   }, [parentIds, refreshNative])
 
-  const pollDelay = state.snapshot?.runs.some(run => run.state === 'active') === true
-    || state.snapshot?.attempts.some(attempt => attempt.state === 'queued' || attempt.state === 'starting') === true
-    ? 1_000
-    : 3_000
-
   useEffect(() => {
     const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
     const load = async (): Promise<void> => {
       try {
-        const snapshot = await listSessions(parentIds, controller.signal)
-        if (!controller.signal.aborted) setState({ status: 'ready', snapshot })
+        let snapshot = await listSessions(parentIds, controller.signal)
+        while (!controller.signal.aborted) {
+          setState({ status: 'ready', snapshot })
+          snapshot = await watchSessions(
+            parentIds,
+            snapshot.hostInstanceId,
+            snapshot.revision,
+            controller.signal,
+          )
+        }
       } catch {
         if (!controller.signal.aborted) {
           setState(previous => ({
@@ -288,22 +366,25 @@ export function SubagentWorkbenchView({
           }))
         }
       }
-      if (controller.signal.aborted) return
-      if (parentIds.length > 0) {
-        const parentId = parentIds[refreshCursor.current % parentIds.length]
-        refreshCursor.current += 1
-        if (parentId !== undefined) void refreshNative(parentId)
-      }
-      timer = setTimeout(() => { void load() }, pollDelay)
     }
     void load()
-    return () => {
-      controller.abort()
-      if (timer !== undefined) clearTimeout(timer)
-    }
+    return () => { controller.abort() }
   // parentIdsKey is the stable value dependency; parentIds is captured from the same render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listSessions, parentIdsKey, pollDelay, refreshNative, request])
+  }, [listSessions, parentIdsKey, request, watchSessions])
+
+  useEffect(() => {
+    if (parentIds.length === 0) return
+    const refreshOne = (): void => {
+      const parentId = parentIds[refreshCursor.current % parentIds.length]
+      refreshCursor.current += 1
+      if (parentId !== undefined) void refreshNative(parentId)
+    }
+    const timer = setInterval(refreshOne, 3_000)
+    return () => { clearInterval(timer) }
+  // parentIdsKey is the stable value dependency; parentIds is captured from the same render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parentIdsKey, refreshNative])
 
   const tree = useMemo(() => buildWorkbenchTree({
     rootSessionId: sessionId,
@@ -413,7 +494,7 @@ export function SubagentWorkbenchView({
   }
 
   return (
-    <section ref={root} className={css.root} aria-busy={state.status === 'loading'} data-subagent-workbench="">
+    <section ref={root} className={css.runtimeRoot} aria-busy={state.status === 'loading'}>
       <header className={css.header}>
         <div>
           <div className={css.titleLine}>
@@ -504,6 +585,179 @@ export function SubagentWorkbenchView({
               </>
             )}
           </aside>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function ComparisonWorkbenchMode({
+  sessionId, injected, t, english,
+}: {
+  readonly sessionId: SessionId
+  readonly injected: PlanExecutionWorkbenchInjected
+  readonly t: SubagentWorkbenchProps['t']
+  readonly english: boolean
+}): ReactNode {
+  const [reload, setReload] = useState(0)
+  const [state, setState] = useState<ComparisonSnapshotState>({
+    planError: false,
+    executionError: false,
+  })
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const loadPlans = async (): Promise<void> => {
+      try {
+        let snapshot = await injected.listPlans([sessionId], controller.signal)
+        while (!controller.signal.aborted) {
+          setState(previous => ({ ...previous, plans: snapshot, planError: false }))
+          snapshot = await injected.watchPlans(
+            [sessionId],
+            snapshot.hostInstanceId,
+            snapshot.revision,
+            controller.signal,
+          )
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setState(previous => ({ ...previous, planError: true }))
+        }
+      }
+    }
+    const loadExecutions = async (): Promise<void> => {
+      try {
+        let snapshot = await injected.listPlanExecutions([sessionId], controller.signal)
+        while (!controller.signal.aborted) {
+          setState(previous => ({ ...previous, executions: snapshot, executionError: false }))
+          snapshot = await injected.watchPlanExecutions(
+            [sessionId],
+            snapshot.hostInstanceId,
+            snapshot.revision,
+            controller.signal,
+          )
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setState(previous => ({ ...previous, executionError: true }))
+        }
+      }
+    }
+    void loadPlans()
+    void loadExecutions()
+    return () => { controller.abort() }
+  }, [injected, reload, sessionId])
+
+  const actions = useMemo(() => ({
+    requestExecution: (request: PlanRevisionRequest, signal: AbortSignal) => (
+      injected.requestPlanExecution(sessionId, request, signal)
+    ),
+    cancelExecution: (request: CancelPlanExecutionRequest, signal: AbortSignal) => (
+      injected.cancelPlanExecution(request, signal)
+    ),
+  }), [injected, sessionId])
+
+  if (state.executions === undefined) {
+    return (
+      <section className={css.comparisonPlaceholder} aria-busy={!state.executionError}>
+        <strong>{state.executionError
+          ? t('workbench.compare.errorTitle')
+          : t('workbench.compare.loadingTitle')}</strong>
+        <p>{state.executionError
+          ? t('workbench.compare.errorBody')
+          : t('workbench.compare.loadingBody')}</p>
+        {state.executionError ? (
+          <button type="button" onClick={() => { setReload(value => value + 1) }}>{t('retry')}</button>
+        ) : null}
+      </section>
+    )
+  }
+
+  return (
+    <>
+      {state.planError || state.executionError ? (
+        <div className={css.failure} role="alert">
+          <span>{t('workbench.compare.stale')}</span>
+          <button type="button" onClick={() => { setReload(value => value + 1) }}>{t('retry')}</button>
+        </div>
+      ) : null}
+      <AgentPlanComparison
+        sessionId={sessionId}
+        plans={state.plans?.plans ?? []}
+        executionSnapshot={state.executions}
+        actions={actions}
+        copy={english ? AGENT_PLAN_COMPARISON_COPY_EN : AGENT_PLAN_COMPARISON_COPY_ZH}
+        canvasCopy={english ? PLAN_COMPARISON_CANVAS_COPY_EN : PLAN_COMPARISON_CANVAS_COPY_ZH}
+      />
+    </>
+  )
+}
+
+type WorkbenchMode = 'runtime' | 'planner' | 'compare'
+
+/** Render the conversation-level workbench with runtime, plan, and comparison modes. */
+export function SubagentWorkbenchView(props: SubagentWorkbenchProps): ReactNode {
+  const { sessionId, t } = props
+  const english = t('locale.code') === 'en'
+  const [mode, setMode] = useState<WorkbenchMode>('runtime')
+  const tabs: readonly { readonly id: WorkbenchMode; readonly label: string }[] = [
+    { id: 'runtime', label: t('workbench.mode.runtime') },
+    { id: 'planner', label: t('workbench.mode.planner') },
+    { id: 'compare', label: t('workbench.mode.compare') },
+  ]
+
+  const selectAdjacent = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    current: number,
+  ): void => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? tabs.length - 1
+        : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+    const next = tabs[nextIndex]
+    if (next === undefined) return
+    setMode(next.id)
+    const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+    buttons?.[nextIndex]?.focus()
+  }
+
+  return (
+    <section className={css.root} data-subagent-workbench="">
+      <nav className={css.modeTabs} role="tablist" aria-label={t('workbench.mode.label')}>
+        {tabs.map((tab, index) => (
+          <button
+            key={tab.id}
+            id={`product-subagent-mode-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-selected={mode === tab.id}
+            aria-controls={`product-subagent-panel-${tab.id}`}
+            tabIndex={mode === tab.id ? 0 : -1}
+            onClick={() => { setMode(tab.id) }}
+            onKeyDown={(event) => { selectAdjacent(event, index) }}
+          >{tab.label}</button>
+        ))}
+      </nav>
+      <div
+        id={`product-subagent-panel-${mode}`}
+        className={css.modeBody}
+        role="tabpanel"
+        aria-labelledby={`product-subagent-mode-${mode}`}
+      >
+        {mode === 'runtime' ? (
+          <RuntimeWorkbenchView {...props} />
+        ) : mode === 'planner' ? (
+          <AgentPlanWorkbench
+            sessionId={sessionId}
+            injected={props}
+            copy={english ? AGENT_PLAN_WORKBENCH_COPY_EN : AGENT_PLAN_WORKBENCH_COPY_ZH}
+            canvasCopy={english ? AGENT_PLAN_CANVAS_COPY_EN : AGENT_PLAN_CANVAS_COPY_ZH}
+          />
+        ) : (
+          <ComparisonWorkbenchMode sessionId={sessionId} injected={props} t={t} english={english} />
         )}
       </div>
     </section>

@@ -14,6 +14,8 @@ import SubagentRuntime, {
 } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ProductSubagentConsoleService, { type Config as ServiceConfig } from '../src/index.js'
+import type { AgentPlanContent } from '../src/plan-types.js'
+import * as ProductSubagentPlanTool from '../src/plan-tool.js'
 import * as ProductSubagentTool from '../src/tool.js'
 
 const contexts: Context[] = []
@@ -121,6 +123,70 @@ function execute(ctx: Context, arguments_: Record<string, unknown>, signal = new
     agent: parent(),
     signal,
   })
+}
+
+function planContent(): AgentPlanContent {
+  return {
+    title: 'Inspect two independent areas',
+    objective: 'Inspect two independent areas and synthesize the findings.',
+    successCriteria: ['Both areas are covered', 'One synthesis is produced'],
+    recommendation: {
+      useMultiAgent: true,
+      rationale: 'The inspections are independent.',
+      singleAgentAlternative: 'Inspect both areas sequentially.',
+      userOverride: false,
+    },
+    pattern: 'parallel-fanout-fanin',
+    optimizationTarget: 'latency',
+    backendPreference: 'workflow',
+    budget: { maxAgents: 3, maxConcurrent: 2, planTimeoutMs: 600_000 },
+    roles: [{
+      roleId: 'inspector',
+      name: 'Inspector',
+      responsibility: 'Inspect one assigned area.',
+      boundaries: [],
+      transportProvider: 'spawn',
+      contextMode: 'fresh',
+      toolPolicy: { mode: 'inherit' },
+    }],
+    tasks: [{
+      taskId: 'area-a',
+      title: 'Inspect area A',
+      brief: 'Inspect area A and return a concise factual summary.',
+      roleId: 'inspector',
+      dependsOn: [],
+      expectedOutput: { description: 'Area A findings.' },
+      completionCriteria: ['Findings are concise'],
+      resourceClaims: [],
+      risk: 'low',
+      approvalRequired: false,
+    }, {
+      taskId: 'area-b',
+      title: 'Inspect area B',
+      brief: 'Inspect area B and return a concise factual summary.',
+      roleId: 'inspector',
+      dependsOn: [],
+      expectedOutput: { description: 'Area B findings.' },
+      completionCriteria: ['Findings are concise'],
+      resourceClaims: [],
+      risk: 'low',
+      approvalRequired: false,
+    }, {
+      taskId: 'synthesis',
+      title: 'Synthesize findings',
+      brief: 'Synthesize both inspection results.',
+      roleId: 'inspector',
+      dependsOn: [
+        { taskId: 'area-a', mode: 'context' },
+        { taskId: 'area-b', mode: 'context' },
+      ],
+      expectedOutput: { description: 'One combined result.' },
+      completionCriteria: ['Both findings are represented'],
+      resourceClaims: [],
+      risk: 'low',
+      approvalRequired: false,
+    }],
+  }
 }
 
 describe('product-subagent-console owned delegation tool', () => {
@@ -281,5 +347,68 @@ describe('product-subagent-console owned delegation tool', () => {
         })],
       })
     })
+  })
+})
+
+describe('product-subagent-console Agent plan design tool', () => {
+  it('saves only a reviewable draft and never starts a subagent', async () => {
+    const { ctx, service } = await harness()
+    const provider = new ControlledProvider('spawn')
+    ctx.subagents.registerProvider(provider)
+    await ctx.plugin(ProductSubagentPlanTool).await()
+
+    await expect(ctx.tools.execute({
+      callId: CallId('plan-call'),
+      name: 'design_subagent_plan',
+      arguments: { plan: planContent() },
+      agent: parent('plan-parent'),
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ isError: false })
+
+    expect(provider.starts).toEqual([])
+    expect(service.planSnapshot(['plan-parent'])).toMatchObject({
+      durability: 'host-only',
+      plans: [{
+        revision: 1,
+        state: 'draft',
+        title: 'Inspect two independent areas',
+      }],
+    })
+    expect(service.planSnapshot(['other-parent']).plans).toEqual([])
+  })
+
+  it('requires the exact existing revision and a calling Agent', async () => {
+    const { ctx, service } = await harness()
+    await ctx.plugin(ProductSubagentPlanTool).await()
+    const first = await ctx.tools.execute({
+      callId: CallId('plan-call-1'),
+      name: 'design_subagent_plan',
+      arguments: { plan: planContent() },
+      agent: parent('plan-parent'),
+      signal: new AbortController().signal,
+    })
+    expect(first.isError).toBe(false)
+    const saved = service.planSnapshot(['plan-parent']).plans[0]
+    if (saved === undefined) throw new Error('fixture plan missing')
+
+    await expect(ctx.tools.execute({
+      callId: CallId('plan-call-2'),
+      name: 'design_subagent_plan',
+      arguments: {
+        plan: { ...planContent(), title: 'Second revision' },
+        plan_id: saved.planId,
+        expected_revision: 0,
+      },
+      agent: parent('plan-parent'),
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ isError: true })
+    expect(service.planSnapshot(['plan-parent']).plans).toHaveLength(1)
+
+    await expect(ctx.tools.execute({
+      callId: CallId('plan-call-3'),
+      name: 'design_subagent_plan',
+      arguments: { plan: planContent() },
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ isError: true })
   })
 })

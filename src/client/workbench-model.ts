@@ -136,14 +136,22 @@ export function buildWorkbenchTree(input: {
     visiting.add(parentSessionId)
     const nativeEntries = catalogChildren(parentSessionId, catalogs)
     const nativeIds = new Set(nativeEntries.map(entry => String(entry.id)))
+    const localRunByChildId = new Map<string, ObservedRunView>()
+    for (const run of snapshot?.runs ?? []) {
+      if (run.parentSessionId !== String(parentSessionId) || !run.local || !nativeIds.has(run.childId)) continue
+      const current = localRunByChildId.get(run.childId)
+      if (current === undefined || run.startedAt > current.startedAt) localRunByChildId.set(run.childId, run)
+    }
     const nativeNodes = nativeEntries.map((entry): NativeWorkbenchNode => {
       const summary = summaries[entry.id]
+      const fallbackLabel = nativeLabel(entry, summary)
+      const observed = localRunByChildId.get(String(entry.id))
       return {
         key: `session:${entry.id}`,
         kind: 'native',
         parentSessionId,
         childSessionId: entry.id,
-        label: nativeLabel(entry, summary),
+        label: observed === undefined ? fallbackLabel : configuredLabel(observed, fallbackLabel),
         // `inactive` means only not presently running; a continuable child may resume.
         state: entry.activity === 'running' ? 'active' : 'inactive',
         mode: entry.mode,

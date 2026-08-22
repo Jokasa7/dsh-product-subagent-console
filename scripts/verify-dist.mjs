@@ -16,11 +16,15 @@ const required = [
   'lib/index.js',
   'lib/tool.js',
   'lib/invariant.js',
+  'lib/planner.js',
+  'lib/plan-tool.js',
   'lib/types.js',
   'lib/client.js',
   'lib/types/index.d.ts',
   'lib/types/tool.d.ts',
   'lib/types/invariant.d.ts',
+  'lib/types/planner.d.ts',
+  'lib/types/plan-tool.d.ts',
   'lib/types/types.d.ts',
   'lib/types/client/index.d.ts',
   'cordis.patch.yml',
@@ -56,7 +60,7 @@ function resolveRuntimeImport(importer, specifier) {
   }
 }
 
-const jsFiles = filesUnder(libRoot).filter(file => file.endsWith('.js'))
+const jsFiles = filesUnder(libRoot).filter(file => file.endsWith('.js') || file.endsWith('.mjs'))
 const publicTextFiles = filesUnder(libRoot).filter(isPublicTextPath)
 for (const file of [
   ...publicTextFiles,

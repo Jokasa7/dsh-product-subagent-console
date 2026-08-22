@@ -80,4 +80,31 @@ describe('workbench layout performance', () => {
     expect(report['star-32']!.widthPx).toBeGreaterThan(report['balanced-32']!.widthPx)
     console.info('workbench-layout-performance', JSON.stringify(report))
   })
+
+  it('keeps large read-only canvases inside a bounded layout budget', () => {
+    const report: Record<string, { p95Ms: number; widthPx: number }> = {}
+    for (const [size, budgetMs] of [[100, 300], [500, 1_000]] as const) {
+      for (const shape of ['balanced', 'star'] as const) {
+        const input = topology(size, shape)
+        layoutWorkbenchCanvas(input)
+        const samples: number[] = []
+        let last = layoutWorkbenchCanvas(input)
+        for (let sample = 0; sample < 5; sample += 1) {
+          const startedAt = performance.now()
+          last = layoutWorkbenchCanvas(input)
+          samples.push(performance.now() - startedAt)
+        }
+        const p95Ms = percentile95(samples)
+        report[`${shape}-${String(size)}`] = {
+          p95Ms: Number(p95Ms.toFixed(3)),
+          widthPx: Math.round(canvasWidth(last)),
+        }
+        expect(last).toHaveLength(size)
+        expect(p95Ms).toBeLessThan(budgetMs)
+      }
+    }
+
+    expect(report['star-500']!.widthPx).toBeGreaterThan(report['balanced-500']!.widthPx)
+    console.info('workbench-large-layout-performance', JSON.stringify(report))
+  })
 })

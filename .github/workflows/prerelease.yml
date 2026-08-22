@@ -113,13 +113,14 @@ jobs:
             --prerelease \
             --title "dsh-product-subagent-console ${GITHUB_REF_NAME}" \
             --notes-file - <<'EOF'
-          Alpha preview of the DSH Product Subagent Console.
+          Alpha preview of the DSH Product Subagent Console Agent Planner.
 
           ## Highlights
 
-          - Adds a Subagents tab to DSH conversations.
-          - Displays native child sessions and compatible Provider runs on a draggable branch canvas.
-          - Provides task details and direct navigation to native child conversations.
+          - Adds Runtime, Plan, and Compare modes to the Subagents tab.
+          - Creates editable Agent roles, tasks, dependencies, Providers, tools, and budgets from a goal.
+          - Preflights and locks approved plan revisions before Workflow execution.
+          - Matches planned tasks with actual child attempts, status, and timing.
 
           ## Compatibility
 

@@ -16,6 +16,11 @@ import SubagentRuntime, {
 } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ProductSubagentConsoleService from '../src/index.js'
+import {
+  executionCapabilitySnapshotSchema,
+  planRepositorySnapshotSchema,
+  type AgentPlanContent,
+} from '../src/plan-types.js'
 import { consoleSnapshotSchema } from '../src/types.js'
 
 const contexts: Context[] = []
@@ -99,6 +104,45 @@ class ControlledProvider implements SubagentProvider {
 
 function parent(id: string): Agent {
   return { id: SessionId(id) } as Agent
+}
+
+function planContent(title = 'Planner fixture'): AgentPlanContent {
+  return {
+    title,
+    objective: 'Produce one bounded factual result.',
+    successCriteria: ['The result is complete'],
+    recommendation: {
+      useMultiAgent: false,
+      rationale: 'One Agent is sufficient.',
+      singleAgentAlternative: 'Use the current Agent.',
+      userOverride: false,
+    },
+    pattern: 'single-agent',
+    optimizationTarget: 'balanced',
+    backendPreference: 'workflow',
+    budget: { maxAgents: 1, maxConcurrent: 1, planTimeoutMs: 60_000 },
+    roles: [{
+      roleId: 'worker',
+      name: 'Worker',
+      responsibility: 'Complete the bounded task.',
+      boundaries: [],
+      transportProvider: 'spawn',
+      contextMode: 'fresh',
+      toolPolicy: { mode: 'inherit' },
+    }],
+    tasks: [{
+      taskId: 'task',
+      title: 'Task',
+      brief: 'Complete the bounded task.',
+      roleId: 'worker',
+      dependsOn: [],
+      expectedOutput: { description: 'One factual result.' },
+      completionCriteria: ['The result is present'],
+      resourceClaims: [],
+      risk: 'low',
+      approvalRequired: false,
+    }],
+  }
 }
 
 async function harness(config: ConstructorParameters<typeof ProductSubagentConsoleService>[1] = {}): Promise<{
@@ -194,6 +238,96 @@ describe('ProductSubagentConsoleService with DSH 0.1.1-rc.2 runtimes', () => {
     cancelled.abort('test')
     await expect(connection.handler?.('list-sessions', { parentSessionIds: ['parent-a'] }, cancelled.signal))
       .resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+
+    await expect(connection.handler?.('watch-sessions', {
+      parentSessionIds: ['parent-a'],
+      hostInstanceId: '00000000-0000-4000-8000-000000000099',
+      afterRevision: snapshot.revision,
+      timeoutMs: 30_000,
+    }, signal)).resolves.toMatchObject({ ok: true })
+  })
+
+  it('saves, watches, preflights, and isolates Host-only plan revisions', async () => {
+    const { connection } = await harness({ plannerMaxConcurrent: 3, plannerMaxAgents: 8 })
+    const signal = new AbortController().signal
+    const firstResponse = await connection.handler?.('planner.save', {
+      parentSessionId: 'parent-a',
+      expectedRevision: 0,
+      content: planContent('First'),
+    }, signal)
+    expect(firstResponse).toMatchObject({ ok: true, value: { revision: 1, state: 'draft' } })
+    if (firstResponse?.ok !== true) throw new Error('fixture expected a saved plan')
+    const first = firstResponse.value as { readonly planId: string; readonly revision: number }
+
+    const listResponse = await connection.handler?.('planner.list', {
+      parentSessionIds: ['parent-a'],
+    }, signal)
+    if (listResponse?.ok !== true) throw new Error('fixture expected a plan snapshot')
+    const snapshot = planRepositorySnapshotSchema.parse(listResponse.value)
+    expect(snapshot).toMatchObject({ durability: 'host-only', revision: 1 })
+    expect(snapshot.plans).toHaveLength(1)
+
+    const watch = connection.handler?.('planner.watch', {
+      parentSessionIds: ['parent-a'],
+      hostInstanceId: snapshot.hostInstanceId,
+      afterRevision: snapshot.revision,
+      timeoutMs: 30_000,
+    }, signal)
+    await Promise.resolve()
+    const secondResponse = await connection.handler?.('planner.save', {
+      parentSessionId: 'parent-a',
+      planId: first.planId,
+      expectedRevision: first.revision,
+      content: planContent('Second'),
+    }, signal)
+    expect(secondResponse).toMatchObject({ ok: true, value: { revision: 2, state: 'draft' } })
+    await expect(watch).resolves.toMatchObject({ ok: true, value: { revision: 2 } })
+
+    await expect(connection.handler?.('planner.watch', {
+      parentSessionIds: ['parent-a'],
+      hostInstanceId: '00000000-0000-4000-8000-000000000099',
+      afterRevision: 2,
+      timeoutMs: 30_000,
+    }, signal)).resolves.toMatchObject({ ok: true, value: { revision: 2 } })
+
+    await expect(connection.handler?.('planner.list', {
+      parentSessionIds: ['parent-b'],
+    }, signal)).resolves.toMatchObject({ ok: true, value: { plans: [] } })
+
+    const capabilitiesResponse = await connection.handler?.('planner.capabilities', {
+      parentSessionId: 'parent-a',
+    }, signal)
+    if (capabilitiesResponse?.ok !== true) throw new Error('fixture expected capabilities')
+    const capabilities = executionCapabilitySnapshotSchema.parse(capabilitiesResponse.value)
+    expect(capabilities).toMatchObject({
+      scopeStatus: 'unavailable',
+      adapters: { workflow: false, agentTeam: false },
+      limits: { maxAgents: 8, maxConcurrent: 3 },
+    })
+
+    const preflight = await connection.handler?.('planner.preflight', {
+      parentSessionId: 'parent-a',
+      planId: first.planId,
+      revision: 2,
+    }, signal)
+    expect(preflight).toMatchObject({
+      ok: true,
+      value: { valid: false, capabilityDigest: capabilities.digest },
+    })
+    await expect(connection.handler?.('planner.approve', {
+      parentSessionId: 'parent-a',
+      planId: first.planId,
+      revision: 2,
+      capabilityDigest: capabilities.digest,
+      acceptedWarningCodes: [],
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'command-error' } })
+
+    await expect(connection.handler?.('planner.save', {
+      parentSessionId: 'parent-a',
+      planId: first.planId,
+      expectedRevision: 1,
+      content: planContent('Stale'),
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'command-error' } })
   })
 
   it('uses AsyncLocalStorage to correlate concurrent official tool/subagent lifecycles exactly', async () => {
