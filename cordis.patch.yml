@@ -1,0 +1,3 @@
+- insert:
+    - id: product-subagent-console
+      name: dsh-product-subagent-console

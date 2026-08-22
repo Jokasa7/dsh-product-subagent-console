@@ -1,0 +1,130 @@
+name: GitHub prerelease
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build draft prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '@deepseek-ai/*'
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+
+      - name: Validate tag and package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          expected="v${version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${expected}." >&2
+            exit 1
+          fi
+          if [[ "${version}" != *-* ]]; then
+            echo "Refusing to create a prerelease for non-prerelease version ${version}." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-list -n 1 "${GITHUB_REF_NAME}")" ]]; then
+            echo "Checked-out commit does not match tag ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run release gates
+        run: |
+          pnpm run build
+          pnpm run pack:check
+          pnpm publint
+
+      - name: Pack prebuilt Bundle and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          pnpm pack --pack-destination release --config.ignore-scripts=true
+          count="$(find release -maxdepth 1 -type f -name '*.tgz' | wc -l)"
+          if [[ "${count}" -ne 1 ]]; then
+            echo "Expected one tarball, found ${count}." >&2
+            exit 1
+          fi
+          (cd release && sha256sum ./*.tgz > SHA256SUMS.txt)
+          (cd release && sha256sum --check SHA256SUMS.txt)
+
+      - name: Preserve release assets as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dsh-product-subagent-console-${{ github.ref_name }}
+          path: |
+            release/*.tgz
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest release package
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*.tgz
+
+      - name: Create draft GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            release/*.tgz \
+            release/SHA256SUMS.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --draft \
+            --prerelease \
+            --title "dsh-product-subagent-console ${GITHUB_REF_NAME}" \
+            --notes-file - <<'EOF'
+          Alpha preview of the DSH Product Subagent Console.
+
+          ## Highlights
+
+          - Adds a Subagents tab to DSH conversations.
+          - Displays native child sessions and compatible Provider runs on a draggable branch canvas.
+          - Provides task details and direct navigation to native child conversations.
+
+          ## Compatibility
+
+          - DeepSeek Harness `0.1.1-rc.2`
+          - Node.js `^22.19.0` or `>=24.0.0`
+
+          Download the `.tgz` package and verify it with `SHA256SUMS.txt` before installation.
+          EOF
