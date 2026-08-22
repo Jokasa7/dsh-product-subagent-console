@@ -1,0 +1,7 @@
+packages:
+  - '.'
+
+autoInstallPeers: true
+
+allowBuilds:
+  esbuild: true

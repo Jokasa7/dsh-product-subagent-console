@@ -1,0 +1,15 @@
+dsh-product-subagent-console
+Copyright (c) 2026 Jokasa7
+
+This independent community project includes and adapts MIT-licensed task-canvas
+and product-subagent console concepts and code from deepseek-ai/deepseek-harness,
+Copyright (c) 2026 DeepSeek. It does not distribute a complete or patched
+Harness application; the installed DSH runtime packages remain separate peer
+dependencies.
+
+The browser artifact privately bundles third-party open-source dependencies.
+Their versions, copyright notices, and license texts are provided in
+THIRD_PARTY_NOTICES.md.
+
+DeepSeek, DeepSeek Harness, Codex, Claude, and Claude Code are names or marks of
+their respective owners. No endorsement by those owners is implied.
