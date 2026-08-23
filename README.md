@@ -10,6 +10,12 @@ See, design, and verify multi-Agent work without leaving a [DeepSeek Harness](ht
 
 The plugin adds a **Subagents** workbench with three connected views: follow delegated work in **Runtime**, prepare an executable plan in **Plan**, and match that plan with the work that actually ran in **Compare**.
 
+It addresses three practical problems:
+
+- find running, finished, or cancellable branches without opening every child conversation;
+- review roles, dependencies, concurrency, resource conflicts, and budget limits before spending Provider time;
+- confirm that every planned task produced the expected attempt and child session after execution.
+
 > Requires DSH `0.1.1-rc.2`. This is an independent community plugin.
 >
 > Alpha preview: plans and execution history are cleared when the DSH Web process restarts.
@@ -24,7 +30,7 @@ The plugin adds a **Subagents** workbench with three connected views: follow del
 
 ## See it in action
 
-The examples below follow one product-launch brief from delegation through verification.
+The three core views are shown below. For a screenshot-by-screenshot journey through editing, preflight, live execution, completion, and cancellation, open the [complete product tour](docs/product-tour.md).
 
 ### Runtime — follow every delegated branch
 
@@ -55,17 +61,28 @@ Compare connects each approved plan task to the attempts and child sessions reco
 
 See [Agent Planner](docs/agent-planner.md) for the complete workflow and field guide.
 
+## Good fits
+
+- **Parallel checks:** inspect frontend, backend, tests, or docs independently, then consolidate the findings.
+- **Staged delivery:** research or implement first, review or integrate later, with explicit context handoffs.
+- **Long-running work:** inspect nested delegation, duration, and state on one canvas, then open a native child conversation when needed.
+- **Execution verification:** compare an approved plan with actual attempts to spot queued, missing, cancelled, or retried branches.
+
 ## Install
 
-Download the `.tgz` file and `SHA256SUMS.txt` from the matching [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases), verify the archive, then add it to the Web profile:
+Download the `.tgz` file and `SHA256SUMS.txt` from the matching [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases), verify the archive, then install it into the profile you use:
 
 ```sh
 sha256sum --check SHA256SUMS.txt
+
+# DSH Desktop: run in Open DSH Terminal
+dsh plugin add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
+
+# Regular Web profile
 dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
-dsh --profile web --dump-config
 ```
 
-Restart the Web profile after installation.
+Restart DSH Desktop or the Web profile after installation.
 
 ## Enable Agent Planner
 
@@ -83,7 +100,7 @@ Preset changes apply to new conversations only. Regular delegated runs remain vi
 
 ## Compatibility
 
-- DeepSeek Harness Web profile `0.1.1-rc.2`
+- DeepSeek Harness Web or Desktop profile `0.1.1-rc.2`
 - Node.js `^22.19.0` or `>=24.0.0`
 - At least one configured compatible subagent Provider for Plan and Compare
 - The matching Provider Bundle for each external coding Agent used by a plan or delegated task
@@ -92,6 +109,7 @@ Keep the plugin and all DSH packages on the same supported version family.
 
 ## Documentation
 
+- [Complete Product Tour](docs/product-tour.md)
 - [Getting Started](docs/getting-started.md)
 - [Agent Planner](docs/agent-planner.md)
 - [Troubleshooting](docs/troubleshooting.md)
@@ -101,10 +119,14 @@ Keep the plugin and all DSH packages on the same supported version family.
 ## Uninstall
 
 ```sh
+# DSH Desktop: run in Open DSH Terminal
+dsh plugin remove dsh-product-subagent-console
+
+# Regular Web profile
 dsh plugin --profile web remove dsh-product-subagent-console
 ```
 
-Restart the Web profile after removal.
+Restart DSH Desktop or the Web profile after removal.
 
 ## Support
 

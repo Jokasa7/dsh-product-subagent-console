@@ -10,6 +10,12 @@
 
 插件会在对话中添加一个**子代理**工作台：通过**运行**观察委派，通过**方案**准备可执行计划，再通过**对照**核验计划与实际运行是否一致。
 
+它主要解决三个实际问题：
+
+- 不必逐个打开子会话，也能快速找到仍在运行、已经结束或需要取消的分支；
+- 在消耗 Provider 时间前，先检查角色分工、依赖、并发、资源冲突和预算限制；
+- 执行结束后，确认每一项计划任务是否真的产生了对应的 attempt 与子会话。
+
 > 需要 DSH `0.1.1-rc.2`。这是独立社区插件。
 >
 > Alpha 预览：DSH Web 进程重启后，方案与执行记录会被清除。
@@ -24,7 +30,7 @@
 
 ## 功能演示
 
-下面使用同一份产品发布简报，连续展示从任务委派到执行核验的完整过程。
+下面展示工作流中的三个核心视图。想查看真实任务从编辑、预检、运行到取消的完整截图流程，请打开[完整功能演示](docs/product-tour.zh.md)。
 
 ### 运行 — 查看每一条委派分支
 
@@ -55,17 +61,28 @@
 
 完整流程与字段说明见 [Agent 方案设计器](docs/agent-planner.zh.md)。
 
+## 适合哪些任务
+
+- **并行核验**：让不同 Agent 分别检查前端、后端、测试或文档，再统一汇总。
+- **分阶段交付**：先研究或实现，后评审或整合，并明确哪些上游结果需要传给下游。
+- **长任务观察**：在一个画板上查看多层委派、耗时和状态，必要时打开原生子会话。
+- **执行验收**：对照批准的方案与真实 attempts，识别排队、缺失、取消或重试分支。
+
 ## 安装
 
-从对应的 [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases) 下载 `.tgz` 和 `SHA256SUMS.txt`，校验后安装到 Web Profile：
+从对应的 [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases) 下载 `.tgz` 和 `SHA256SUMS.txt`，校验后安装到实际使用的 Profile：
 
 ```sh
 sha256sum --check SHA256SUMS.txt
+
+# DSH Desktop：在“Open DSH Terminal”中执行
+dsh plugin add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
+
+# 普通 Web Profile
 dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
-dsh --profile web --dump-config
 ```
 
-安装后请重启 Web Profile。
+安装后请重启 DSH Desktop 或 Web Profile。
 
 ## 启用 Agent 方案设计器
 
@@ -83,7 +100,7 @@ dsh --profile web --dump-config
 
 ## 兼容性
 
-- DeepSeek Harness Web Profile `0.1.1-rc.2`
+- DeepSeek Harness Web 或 Desktop Profile `0.1.1-rc.2`
 - Node.js `^22.19.0` 或 `>=24.0.0`
 - 使用“方案”和“对照”时，至少需要一个已配置的兼容子代理 Provider
 - 方案或普通委派任务使用外部 coding Agent 时，需要该 Agent 对应的 Provider Bundle
@@ -92,6 +109,7 @@ dsh --profile web --dump-config
 
 ## 使用文档
 
+- [完整功能演示](docs/product-tour.zh.md)
 - [入门指南](docs/getting-started.zh.md)
 - [Agent 方案设计器](docs/agent-planner.zh.md)
 - [故障排查](docs/troubleshooting.zh.md)
@@ -101,10 +119,14 @@ dsh --profile web --dump-config
 ## 卸载
 
 ```sh
+# DSH Desktop：在“Open DSH Terminal”中执行
+dsh plugin remove dsh-product-subagent-console
+
+# 普通 Web Profile
 dsh plugin --profile web remove dsh-product-subagent-console
 ```
 
-卸载后请重启 Web Profile。
+卸载后请重启 DSH Desktop 或 Web Profile。
 
 ## 支持
 
