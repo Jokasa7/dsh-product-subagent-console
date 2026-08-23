@@ -27,7 +27,11 @@ function capabilities(overrides: Partial<ExecutionCapabilitySnapshot> = {}): Exe
     }],
     llmRoutes: [{ provider: 'deepseek', models: ['deepseek-chat'], catalogStatus: 'available' }],
     agentPresets: ['researcher'],
-    tools: ['web_search'],
+    tools: ['web_search', 'execute_subagent_plan'],
+    plannerTools: {
+      design: ['design_subagent_plan'],
+      execute: ['execute_subagent_plan'],
+    },
     budgetSupport: {
       maxAgents: 'enforced',
       maxConcurrent: 'enforced',
@@ -99,6 +103,33 @@ function plan(tasks: PlanTask[]): AgentPlanRevision {
 }
 
 describe('Agent plan preflight', () => {
+  it('blocks approval when the current Agent scope does not expose the execution tool', () => {
+    const result = preflightAgentPlan(plan([task('a')]), capabilities({
+      tools: ['web_search'],
+    }))
+
+    expect(result.valid).toBe(false)
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'planner.execution-tool-unavailable',
+      severity: 'error',
+      support: 'unsupported',
+    }))
+  })
+
+  it('blocks approval when the parent Agent scope is unavailable', () => {
+    const result = preflightAgentPlan(plan([task('a')]), capabilities({
+      scopeStatus: 'unavailable',
+      tools: [],
+    }))
+
+    expect(result.valid).toBe(false)
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'planner.agent-scope-unavailable',
+      severity: 'error',
+      support: 'unsupported',
+    }))
+  })
+
   it('derives deterministic ready waves from dependency edges', () => {
     const tasks = [
       task('a'),

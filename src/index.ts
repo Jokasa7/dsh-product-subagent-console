@@ -54,6 +54,7 @@ import {
   listPlanExecutionsRequestSchema,
   listPlansRequestSchema,
   PREFLIGHT_PLAN_ENDPOINT,
+  type PlannerRpcReason,
   planRevisionRequestSchema,
   SAVE_PLAN_ENDPOINT,
   savePlanRequestSchema,
@@ -158,6 +159,26 @@ interface OwnedSignal {
 
 interface ExecutionGrantRecord extends PlanExecutionGrant {
   readonly planKey: string
+}
+
+type PlanExecutionGrantFailureReason = Extract<PlannerRpcReason,
+  | 'agent-scope-unavailable'
+  | 'already-active'
+  | 'capacity-reached'
+  | 'execution-tool-unavailable'
+  | 'not-approved'
+  | 'not-found'
+  | 'stale-capabilities'
+  | 'workflow-unavailable'>
+
+class PlanExecutionGrantError extends Error {
+  constructor(
+    readonly reason: PlanExecutionGrantFailureReason,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'PlanExecutionGrantError'
+  }
 }
 
 type ConsoleRpcResponse = Awaited<ReturnType<ConnectionRpcHandler>>
@@ -375,25 +396,44 @@ export class ProductSubagentConsoleService extends Service {
   ): Promise<PlanExecutionGrant> {
     this.pruneExecutionGrants()
     const plan = this.plans.get(parentSessionId, planId, revision)
-    if (plan === undefined) throw new Error('approved Agent plan revision was not found')
-    if (plan.state !== 'approved') throw new Error('only an approved Agent plan revision can receive an execution grant')
+    if (plan === undefined) {
+      throw new PlanExecutionGrantError('not-found', 'approved Agent plan revision was not found')
+    }
+    if (plan.state !== 'approved') {
+      throw new PlanExecutionGrantError(
+        'not-approved',
+        'only an approved Agent plan revision can receive an execution grant',
+      )
+    }
     const planKey = executionPlanKey(parentSessionId, planId, revision)
     if (this.activePlanExecutions.has(planKey)) {
-      throw new Error('this Agent plan revision already has an active execution')
+      throw new PlanExecutionGrantError(
+        'already-active',
+        'this Agent plan revision already has an active execution',
+      )
     }
     const capabilities = await this.executionCapabilities(parentSessionId, signal)
     if (!capabilities.adapters.workflow) {
-      throw new Error('Workflow execution is unavailable in this DSH profile')
+      throw new PlanExecutionGrantError(
+        'workflow-unavailable',
+        'Workflow execution is unavailable in this DSH profile',
+      )
     }
     const executeToolName = capabilities.plannerTools?.execute.find(name => capabilities.tools.includes(name))
     if (capabilities.scopeStatus !== 'available') {
-      throw new Error('the current Agent scope is unavailable')
+      throw new PlanExecutionGrantError('agent-scope-unavailable', 'the current Agent scope is unavailable')
     }
     if (executeToolName === undefined) {
-      throw new Error('the plan execution tool is unavailable in the current Agent scope')
+      throw new PlanExecutionGrantError(
+        'execution-tool-unavailable',
+        'the plan execution tool is unavailable in the current Agent scope',
+      )
     }
     if (plan.capabilityDigest !== capabilities.digest) {
-      throw new Error('execution capabilities changed after approval')
+      throw new PlanExecutionGrantError(
+        'stale-capabilities',
+        'execution capabilities changed after approval',
+      )
     }
     const preflight = preflightAgentPlan(plan, capabilities)
     if (!preflight.valid) throw new PlanApprovalError('approved Agent plan no longer passes preflight')
@@ -407,7 +447,10 @@ export class ProductSubagentConsoleService extends Service {
       return publicGrant
     }
     if (this.executionGrants.size >= 256) {
-      throw new Error('execution grant capacity reached; wait for existing grants to expire')
+      throw new PlanExecutionGrantError(
+        'capacity-reached',
+        'execution grant capacity reached; wait for existing grants to expire',
+      )
     }
     const grant: ExecutionGrantRecord = {
       grantId: randomUUID(),
@@ -852,6 +895,7 @@ export class ProductSubagentConsoleService extends Service {
           `${error.message}; expected=${String(error.expectedRevision)} actual=${String(error.actualRevision)}`,
         )
       }
+      if (error instanceof PlanExecutionGrantError) return plannerRpcError(error.reason, error.message)
       if (error instanceof PlanOwnershipError) return plannerRpcError('forbidden', error.message)
       if (error instanceof PlanExecutionOwnershipError) return plannerRpcError('forbidden', error.message)
       if (error instanceof PlanApprovalError) return plannerRpcError('preflight-blocked', error.message)
@@ -1028,9 +1072,11 @@ export class ProductSubagentConsoleService extends Service {
   }
 }
 
-function plannerRpcError(reason: string, message: string): ConsoleRpcResponse {
+function plannerRpcError(reason: PlannerRpcReason, message: string): ConsoleRpcResponse {
   return {
     ok: false,
+    // DSH keeps command-error details closed as {}; the bounded prefix is the
+    // channel-owned machine reason and clients only accept an explicit allowlist.
     error: { code: 'command-error', message: `[${reason}] ${message}`, details: {} },
   }
 }

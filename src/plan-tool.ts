@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import schema from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ParameterPropertySpec } from '@deepseek-ai/dsh-tools'
 import type {} from './index.js'
 import { agentPlanContentSchema, assertBoundedJsonValue } from './plan-types.js'
 
@@ -19,6 +19,226 @@ export const Config: schema<Config> = schema.object({
   executeToolName: schema.string().default('execute_subagent_plan'),
 })
 
+const identifierDescription = 'Stable kebab-case identifier unique within this plan.'
+
+/**
+ * Keep the complete plan shape model-visible. An unconstrained `json` parameter
+ * forces Agents to discover the private TypeScript schema before they can make
+ * a valid call, which wastes time and context on an otherwise self-describing
+ * planning action. Zod remains the authoritative runtime validator below.
+ */
+const agentPlanParameterSpec = {
+  type: 'object',
+  required: true,
+  additionalProperties: false,
+  description: 'Complete reviewable Agent plan draft. This call saves it but never starts an Agent.',
+  properties: {
+    title: { type: 'string', required: true, description: 'Short user-facing plan title.' },
+    objective: { type: 'string', required: true, description: 'Concrete outcome the whole plan must achieve.' },
+    successCriteria: {
+      type: 'array',
+      required: true,
+      description: 'Observable whole-plan success criteria.',
+      items: { type: 'string' },
+    },
+    recommendation: {
+      type: 'object',
+      required: true,
+      additionalProperties: false,
+      properties: {
+        useMultiAgent: {
+          type: 'boolean',
+          required: true,
+          description: 'Whether multiple Agents are justified for this objective.',
+        },
+        rationale: {
+          type: 'string',
+          required: true,
+          description: 'Why this decomposition is preferable for the objective.',
+        },
+        singleAgentAlternative: {
+          type: 'string',
+          description: 'Practical single-Agent fallback when one exists.',
+        },
+        userOverride: {
+          type: 'boolean',
+          description: 'True only when the user explicitly requires multiple Agents despite the recommendation.',
+          default: false,
+        },
+      },
+    },
+    pattern: {
+      type: 'string',
+      required: true,
+      enum: [
+        'single-agent',
+        'manager-workers',
+        'parallel-fanout-fanin',
+        'sequential-dag',
+        'competing-hypotheses',
+        'peer-team',
+      ],
+      description: 'Coordination pattern represented by the task dependency graph. Use parallel-fanout-fanin when independent tasks run together before one downstream synthesis; use sequential-dag only for genuinely ordered stages.',
+    },
+    optimizationTarget: {
+      type: 'string',
+      enum: ['balanced', 'quality', 'latency', 'cost'],
+      description: 'Primary optimization target. Defaults to balanced.',
+      default: 'balanced',
+    },
+    backendPreference: {
+      type: 'string',
+      enum: ['auto', 'workflow', 'agent-team'],
+      description: 'Preferred execution backend. Use auto unless the user requires a supported backend.',
+      default: 'auto',
+    },
+    budget: {
+      type: 'object',
+      required: true,
+      additionalProperties: false,
+      description: 'Whole-plan concurrency and resource limits.',
+      properties: {
+        maxAgents: { type: 'integer', description: 'Maximum total Agents. Allowed range: 1-32.', default: 5 },
+        maxConcurrent: { type: 'integer', description: 'Maximum concurrent Agents. Allowed range: 1-16.', default: 4 },
+        planTimeoutMs: { type: 'integer', description: 'Whole-plan timeout in milliseconds. Allowed range: 60000-7200000.', default: 1_800_000 },
+        maxRequests: { type: 'integer', description: 'Optional request budget. Omit unless explicitly requested or known to be supported; preflight reports unsupported limits.' },
+        maxTokens: { type: 'integer', description: 'Optional token budget. Omit unless explicitly requested or known to be supported; preflight reports unsupported limits.' },
+        maxCostUsd: { type: 'number', description: 'Optional cost ceiling in USD. Omit unless explicitly requested or known to be supported; preflight blocks unsupported limits.' },
+      },
+    },
+    roles: {
+      type: 'array',
+      required: true,
+      description: 'Roles referenced by tasks.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          roleId: { type: 'string', required: true, description: identifierDescription },
+          name: { type: 'string', required: true, description: 'Short user-facing role name.' },
+          responsibility: { type: 'string', required: true, description: 'What this role owns.' },
+          boundaries: {
+            type: 'array',
+            description: 'Explicit work this role must not perform.',
+            items: { type: 'string' },
+          },
+          transportProvider: {
+            type: 'string',
+            required: true,
+            description: 'Registered DSH subagent Provider. Common values are spawn for isolated work and fork when parent context is required; preflight verifies availability.',
+          },
+          llmProvider: {
+            type: 'string',
+            description: 'Optional model Provider wish. Omit unless the selected backend can enforce it.',
+          },
+          model: {
+            type: 'string',
+            description: 'Optional model wish. Omit unless the selected backend can enforce it.',
+          },
+          agentPreset: {
+            type: 'string',
+            description: 'Optional Agent preset wish. Omit unless the selected backend can enforce it.',
+          },
+          contextMode: {
+            type: 'string',
+            enum: ['fresh', 'fork'],
+            description: 'Start with fresh context or fork the parent context. Defaults to fresh.',
+            default: 'fresh',
+          },
+          toolPolicy: {
+            description: 'Use inherit for executable auto/workflow plans. An allowlist is only a capability request and preflight may block it when the selected backend cannot enforce per-node tools.',
+            oneOf: [{
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                mode: { type: 'string', required: true, const: 'inherit' },
+              },
+            }, {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                mode: { type: 'string', required: true, const: 'allowlist' },
+                tools: { type: 'array', required: true, items: { type: 'string' } },
+              },
+            }],
+          },
+        },
+      },
+    },
+    tasks: {
+      type: 'array',
+      required: true,
+      description: 'Executable tasks and their dependency edges.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          taskId: { type: 'string', required: true, description: identifierDescription },
+          title: { type: 'string', required: true, description: 'Short user-facing task title.' },
+          brief: {
+            type: 'string',
+            required: true,
+            description: 'Self-contained, outcome-bounded instructions for the assigned role. Name the allowed inputs or commands, prohibit unnecessary exploration, and include a clear stop condition so simple tasks finish promptly.',
+          },
+          roleId: { type: 'string', required: true, description: 'roleId of the role that owns this task.' },
+          dependsOn: {
+            type: 'array',
+            description: 'Upstream task dependencies. Use context when the upstream result must be passed to this task; use order-only for sequencing alone.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                taskId: { type: 'string', required: true, description: 'Upstream taskId.' },
+                mode: { type: 'string', required: true, enum: ['order-only', 'context'] },
+              },
+            },
+          },
+          expectedOutput: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              description: { type: 'string', required: true, description: 'Human-readable deliverable.' },
+              schema: { type: 'json', description: 'Optional JSON object shape for a structured deliverable.' },
+            },
+          },
+          completionCriteria: {
+            type: 'array',
+            required: true,
+            description: 'Observable checks that make this task complete.',
+            items: { type: 'string' },
+          },
+          resourceClaims: {
+            type: 'array',
+            description: 'Relative resource identifiers used to detect unsafe parallel write overlap.',
+            items: { type: 'string' },
+          },
+          risk: {
+            type: 'string',
+            enum: ['low', 'medium', 'high'],
+            description: 'Task risk level. Defaults to low.',
+            default: 'low',
+          },
+          approvalRequired: {
+            type: 'boolean',
+            description: 'Whether this task needs an additional approval before execution.',
+            default: false,
+          },
+          budgetHint: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Optional task-level budget hint.',
+            properties: {
+              maxTokens: { type: 'integer' },
+              maxCostUsd: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const satisfies ParameterPropertySpec
+
 /** Register draft-design and separately gated approved-plan execution tools. */
 export function apply(ctx: Context, config: Config = {}): void {
   const toolName = config.toolName ?? 'design_subagent_plan'
@@ -34,14 +254,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       'Save a reviewable Agent plan draft for the current conversation. Use this only when the user asks '
       + 'for multi-Agent design, delegation architecture, or a complex execution plan. First decide whether '
       + 'multiple Agents are justified; simple work should use a single-Agent plan. This tool never starts Agents. '
+      + 'Keep each task narrowly scoped with explicit inputs, outputs, boundaries, and a stop condition. '
+      + 'For auto/workflow drafts, keep toolPolicy in inherit mode and express read-only or no-tool intent in role boundaries and task briefs; do not invent an unsupported allowlist. '
       + 'The user reviews and edits the draft in Subagents > Plan before any execution can be approved.',
     parameters: {
       plan: {
-        type: 'json',
-        required: true,
-        description:
-          'A complete AgentPlanContent object containing the recommendation, roles, tasks, dependency modes, '
-          + 'Provider wishes, tool policy, resource claims, completion criteria, and budgets.',
+        ...agentPlanParameterSpec,
       },
       plan_id: {
         type: 'string',

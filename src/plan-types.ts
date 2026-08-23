@@ -30,6 +30,23 @@ const resourceClaimSchema = z.string().trim().min(1).max(256).superRefine((value
 export const capabilitySupportSchema = z.enum(['enforced', 'advisory', 'unsupported'])
 export type CapabilitySupport = z.infer<typeof capabilitySupportSchema>
 
+/** Safe machine reasons carried in the bounded prefix of planner command errors. */
+export const plannerRpcReasonSchema = z.enum([
+  'agent-scope-unavailable',
+  'already-active',
+  'capacity-reached',
+  'execution-tool-unavailable',
+  'forbidden',
+  'invalid-request',
+  'not-approved',
+  'not-found',
+  'preflight-blocked',
+  'revision-conflict',
+  'stale-capabilities',
+  'workflow-unavailable',
+])
+export type PlannerRpcReason = z.infer<typeof plannerRpcReasonSchema>
+
 /** Values accepted inside task output schemas and across the planner RPC boundary. */
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 

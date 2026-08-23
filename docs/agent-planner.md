@@ -49,7 +49,7 @@ Preflight checks the exact saved revision against the current DSH profile. It re
 - unsupported execution backends or capabilities;
 - budget and possible parallel-resource conflicts.
 
-Editing a draft invalidates its previous preflight result. Run preflight again before approval. If the DSH capability set changes after approval, preflight must also be repeated before execution.
+Editing a draft invalidates its previous preflight result. Run preflight again before approval. If the DSH capability set changes after approval, the approved revision is never rewritten in place: create a new revision from its approved content, save it, rerun preflight, approve that new revision, and only then request execution.
 
 ## Compare planned and actual work
 

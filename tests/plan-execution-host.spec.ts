@@ -27,6 +27,7 @@ import * as ProductSubagentPlanTool from '../src/plan-tool.js'
 import {
   APPROVE_PLAN_ENDPOINT,
   CANCEL_PLAN_EXECUTION_ENDPOINT,
+  ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT,
   LIST_PLAN_EXECUTIONS_ENDPOINT,
   PREFLIGHT_PLAN_ENDPOINT,
   WATCH_PLAN_EXECUTIONS_ENDPOINT,
@@ -251,6 +252,7 @@ interface Fixture {
   readonly connection: CapturingConnectionService
   readonly workflow: ControlledWorkflowEngine
   readonly workflowFiber: ReturnType<Context['plugin']>
+  readonly planToolFiber: ReturnType<Context['plugin']>
 }
 
 async function harness(planTools: { readonly toolName?: string; readonly executeToolName?: string } = {}): Promise<Fixture> {
@@ -266,13 +268,15 @@ async function harness(planTools: { readonly toolName?: string; readonly execute
   await ctx.plugin(ProductSubagentConsoleService).await()
   ctx.agents.register(parent())
   ctx.subagents.registerProvider(new FixtureProvider())
-  await ctx.plugin(ProductSubagentPlanTool, planTools).await()
+  const planToolFiber = ctx.plugin(ProductSubagentPlanTool, planTools)
+  await planToolFiber.await()
   return {
     ctx,
     service: ctx.productSubagentConsole,
     connection: ctx.get('connection') as unknown as CapturingConnectionService,
     workflow: ctx.workflowEngine as ControlledWorkflowEngine,
     workflowFiber,
+    planToolFiber,
   }
 }
 
@@ -344,6 +348,88 @@ async function executionList(
 }
 
 describe('approved Agent plan Host/tool execution chain', () => {
+  it('returns a stable safe RPC reason when the current preset loses the execution tool', async () => {
+    const fixture = await harness()
+    const approved = await approve(fixture)
+    await fixture.planToolFiber.dispose()
+
+    await expect(fixture.connection.call(ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT, {
+      parentSessionId: 'plan-parent',
+      planId: approved.planId,
+      revision: approved.revision,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'command-error',
+        message: expect.stringMatching(/^\[execution-tool-unavailable\]/u),
+        details: {},
+      },
+    })
+  })
+
+  it('recovers from changed capabilities only through a new preflighted and approved revision', async () => {
+    const fixture = await harness()
+    const approved = await approve(fixture)
+    fixture.ctx.subagents.registerProvider({
+      name: 'additional-provider',
+      inheritsParentContext: false,
+      capabilities: NO_START_CAPABILITIES,
+      async start() {
+        throw new Error('the additional fixture provider must not be started')
+      },
+    })
+
+    await expect(fixture.connection.call(ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT, {
+      parentSessionId: 'plan-parent',
+      planId: approved.planId,
+      revision: approved.revision,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'command-error',
+        message: expect.stringMatching(/^\[stale-capabilities\]/u),
+        details: {},
+      },
+    })
+
+    const next = fixture.service.savePlanDraft({
+      parentSessionId: 'plan-parent',
+      planId: approved.planId,
+      expectedRevision: approved.revision,
+      content: planContent('Revalidate the same work against the changed capability set.'),
+    })
+    const capabilities = await fixture.service.executionCapabilities('plan-parent')
+    const preflightResponse = await fixture.connection.call(PREFLIGHT_PLAN_ENDPOINT, {
+      parentSessionId: 'plan-parent',
+      planId: next.planId,
+      revision: next.revision,
+    })
+    if (!preflightResponse.ok) throw new Error(preflightResponse.error.message)
+    const preflight = planPreflightResultSchema.parse(preflightResponse.value)
+    expect(preflight.valid).toBe(true)
+    const approvalResponse = await fixture.connection.call(APPROVE_PLAN_ENDPOINT, {
+      parentSessionId: 'plan-parent',
+      planId: next.planId,
+      revision: next.revision,
+      capabilityDigest: capabilities.digest,
+      acceptedWarningIds: preflight.diagnostics
+        .filter(item => item.severity === 'warning')
+        .map(item => item.diagnosticId),
+    })
+    expect(approvalResponse).toMatchObject({
+      ok: true,
+      value: { revision: next.revision, state: 'approved' },
+    })
+    await expect(fixture.connection.call(ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT, {
+      parentSessionId: 'plan-parent',
+      planId: next.planId,
+      revision: next.revision,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { planId: next.planId, revision: next.revision },
+    })
+  })
+
   it('rejects drafts and mismatched revisions, then executes only the exact approved revision', async () => {
     const fixture = await harness()
     const draft = fixture.service.savePlanDraft({
@@ -396,6 +482,8 @@ describe('approved Agent plan Host/tool execution chain', () => {
     await vi.waitFor(() => { expect(fixture.workflow.runs).toHaveLength(1) })
     const args = fixture.workflow.runs[0]?.request.args as WorkflowPlanArgs
     expect(args.objective).toBe(planContent().objective)
+    expect(args.successCriteria).toEqual(planContent().successCriteria)
+    expect(args.tasks.map(task => task.brief)).toEqual(planContent().tasks.map(task => task.brief))
     fixture.workflow.complete(0)
     await expect(exact).resolves.toMatchObject({
       isError: false,

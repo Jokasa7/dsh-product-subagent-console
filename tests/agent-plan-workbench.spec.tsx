@@ -226,6 +226,55 @@ describe('Agent plan workbench', () => {
     expect(await screen.findByText('已保存修订 2。')).toBeTruthy()
   })
 
+  it('shows optional whole-plan budgets and lets users clear an unsupported retained value', async () => {
+    const stored = revision()
+    stored.budget = {
+      ...stored.budget,
+      maxRequests: 20,
+      maxTokens: 40_000,
+      maxCostUsd: 5,
+    }
+    const actions = injected({ listPlans: vi.fn(async () => snapshot(stored)) })
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByDisplayValue('Release review')
+
+    expect((screen.getByLabelText('最多请求') as HTMLInputElement).value).toBe('20')
+    expect((screen.getByLabelText('最多 Tokens') as HTMLInputElement).value).toBe('40000')
+    const cost = screen.getByLabelText('最高成本（USD）') as HTMLInputElement
+    expect(cost.value).toBe('5')
+    expect(cost.disabled).toBe(false)
+    fireEvent.change(cost, { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存草案' }))
+
+    await waitFor(() => {
+      expect(actions.savePlan).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.objectContaining({
+          budget: expect.not.objectContaining({ maxCostUsd: expect.anything() }),
+        }),
+      }), expect.any(AbortSignal))
+    })
+  })
+
+  it.each([
+    ['revision-conflict', '方案已被其他更新改动'],
+    ['not-found', '该方案已不存在'],
+    ['stale-capabilities', '创建新修订'],
+  ])('maps stable planner reason %s to actionable plan feedback', async (reason, expected) => {
+    const actions = injected({
+      savePlan: vi.fn(async () => {
+        throw new Error(`product-subagent-console RPC failed: ${reason}`)
+      }),
+    })
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByDisplayValue('Release review')
+
+    fireEvent.click(screen.getByRole('button', { name: 'select-frontend' }))
+    fireEvent.change(screen.getByLabelText('任务名称'), { target: { value: 'Updated review' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存草案' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain(expected)
+  })
+
   it('requires explicit warning acceptance before approval', async () => {
     const result: PlanPreflightResult = {
       planId,

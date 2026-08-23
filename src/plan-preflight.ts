@@ -150,6 +150,28 @@ export function preflightAgentPlan(
   const presets = new Set(capabilities.agentPresets)
   const tools = new Set(capabilities.tools)
 
+  if (capabilities.scopeStatus !== 'available') {
+    diagnostics.push(diagnostic(
+      'error',
+      'planner.agent-scope-unavailable',
+      'The current Agent scope is unavailable, so this plan cannot be executed.',
+      {
+        fixHint: 'Open the plan from a live conversation and run preflight again.',
+        support: 'unsupported',
+      },
+    ))
+  } else if (!capabilities.plannerTools?.execute.some(name => tools.has(name))) {
+    diagnostics.push(diagnostic(
+      'error',
+      'planner.execution-tool-unavailable',
+      'The current Agent preset does not expose the plan execution tool.',
+      {
+        fixHint: 'Start a new conversation with a preset that includes dsh-product-subagent-console/plan-tool.',
+        support: 'unsupported',
+      },
+    ))
+  }
+
   for (const id of duplicateValues(roleIds)) {
     diagnostics.push(diagnostic('error', 'role.duplicate-id', `Role id "${id}" is duplicated.`, { nodeIds: [id] }))
   }

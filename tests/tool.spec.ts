@@ -351,6 +351,69 @@ describe('product-subagent-console owned delegation tool', () => {
 })
 
 describe('product-subagent-console Agent plan design tool', () => {
+  it('publishes the complete plan shape to the model instead of an opaque JSON value', async () => {
+    const { ctx } = await harness()
+    await ctx.plugin(ProductSubagentPlanTool).await()
+
+    const definition = ctx.tools.get('design_subagent_plan')
+    if (definition === undefined) throw new Error('fixture plan tool missing')
+    expect(definition.parameters).toMatchObject({
+      type: 'object',
+      properties: {
+        plan: {
+          type: 'object',
+          additionalProperties: false,
+          required: expect.arrayContaining([
+            'title', 'objective', 'successCriteria', 'recommendation', 'pattern', 'budget', 'roles', 'tasks',
+          ]),
+          properties: {
+            recommendation: {
+              type: 'object',
+              properties: {
+                useMultiAgent: { type: 'boolean' },
+                rationale: { type: 'string' },
+              },
+            },
+            roles: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  roleId: { type: 'string' },
+                  transportProvider: { type: 'string' },
+                  toolPolicy: {
+                    description: expect.stringContaining('Use inherit for executable auto/workflow plans'),
+                    oneOf: expect.any(Array),
+                  },
+                },
+              },
+            },
+            tasks: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  brief: { description: expect.stringContaining('stop condition') },
+                  dependsOn: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: { mode: { enum: ['order-only', 'context'] } },
+                    },
+                  },
+                  expectedOutput: { type: 'object' },
+                  completionCriteria: { type: 'array' },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    expect(definition.description).toContain('stop condition')
+    expect(definition.description).toContain('do not invent an unsupported allowlist')
+  })
+
   it('saves only a reviewable draft and never starts a subagent', async () => {
     const { ctx, service } = await harness()
     const provider = new ControlledProvider('spawn')

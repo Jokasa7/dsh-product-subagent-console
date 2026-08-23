@@ -18,6 +18,7 @@ import {
   buildPlanComparisonGraph, executionNodeId, findExecutionPlanRevision,
   type PlanComparisonNode,
 } from './plan-comparison-model.js'
+import { plannerActionReason } from './planner-errors.js'
 import css from './AgentPlanComparison.module.css'
 
 /** Authority-bearing callbacks supplied by the client entry. */
@@ -37,6 +38,17 @@ export interface AgentPlanComparisonActions {
 const COMPARISON_COPY_ZH_VALUES = {
   notFoundError: '该执行已不存在，请刷新运行快照。',
   alreadyTerminalError: '该执行已经结束，无需再次取消。',
+  alreadyActiveError: '该修订已有执行。请刷新并查看现有执行。',
+  executionToolUnavailableError: '当前 Agent 预设没有启用方案执行工具。请使用包含 dsh-product-subagent-console/plan-tool 的预设新建会话。',
+  conversationNotReadyError: '当前对话 Agent 上下文不可用。请刷新页面，或使用正确预设新建对话。',
+  capacityReachedError: '执行授权容量已满。请等待现有请求结束或过期后重试。',
+  forbiddenError: '该方案或执行不属于当前对话。请刷新当前对话。',
+  invalidRequestError: '当前执行请求无效。请刷新方案与执行快照后重试。',
+  notApprovedError: '该修订尚未批准。请先在方案模式完成预检并批准精确修订。',
+  preflightBlockedError: '预检仍有阻塞问题。请返回方案模式修复并重新批准。',
+  revisionConflictError: '方案修订已经变化。请刷新后选择最新批准修订。',
+  staleCapabilitiesError: '当前 Profile 的执行能力已经变化。请创建新修订，保存、重新预检并批准后再执行。',
+  workflowUnavailableError: '当前 Profile 没有可用的 Workflow 执行器。请检查插件与 Profile 配置。',
   genericError: '操作失败，请刷新后重试。',
   status: '状态',
   backend: '后端',
@@ -98,6 +110,17 @@ export const AGENT_PLAN_COMPARISON_COPY_ZH: AgentPlanComparisonCopy = COMPARISON
 export const AGENT_PLAN_COMPARISON_COPY_EN: AgentPlanComparisonCopy = {
   notFoundError: 'This execution no longer exists. Refresh the execution snapshot.',
   alreadyTerminalError: 'This execution has already ended and cannot be cancelled again.',
+  alreadyActiveError: 'This revision already has an execution. Refresh and inspect the existing execution.',
+  executionToolUnavailableError: 'The current Agent preset does not enable plan execution. Start a new conversation with a preset that includes dsh-product-subagent-console/plan-tool.',
+  conversationNotReadyError: 'The current conversation Agent context is unavailable. Refresh, or start a new conversation with the correct preset.',
+  capacityReachedError: 'Execution grant capacity is full. Wait for an existing request to finish or expire, then try again.',
+  forbiddenError: 'This plan or execution does not belong to the current conversation. Refresh the conversation.',
+  invalidRequestError: 'The execution request is invalid. Refresh the plan and execution snapshots, then try again.',
+  notApprovedError: 'This revision is not approved. Complete preflight and approve the exact revision in Plan first.',
+  preflightBlockedError: 'Preflight still has blocking issues. Return to Plan, resolve them, and approve again.',
+  revisionConflictError: 'The plan revision changed. Refresh and select the latest approved revision.',
+  staleCapabilitiesError: 'Execution capabilities in this profile changed. Create a new revision, save it, rerun preflight, and approve it before execution.',
+  workflowUnavailableError: 'This profile has no available Workflow executor. Check the plugin and profile configuration.',
   genericError: 'The action failed. Refresh and try again.',
   status: 'Status',
   backend: 'Backend',
@@ -215,7 +238,26 @@ function formatCopy(template: string, values: Readonly<Record<string, string | n
 }
 
 function safeActionMessage(error: unknown, copy: AgentPlanComparisonCopy): string {
+  const reason = plannerActionReason(error)
+  switch (reason) {
+    case 'agent-scope-unavailable': return copy.conversationNotReadyError
+    case 'already-active': return copy.alreadyActiveError
+    case 'capacity-reached': return copy.capacityReachedError
+    case 'execution-tool-unavailable': return copy.executionToolUnavailableError
+    case 'forbidden': return copy.forbiddenError
+    case 'invalid-request': return copy.invalidRequestError
+    case 'not-approved': return copy.notApprovedError
+    case 'not-found': return copy.notFoundError
+    case 'preflight-blocked': return copy.preflightBlockedError
+    case 'revision-conflict': return copy.revisionConflictError
+    case 'stale-capabilities': return copy.staleCapabilitiesError
+    case 'workflow-unavailable': return copy.workflowUnavailableError
+    case undefined: break
+  }
   const message = error instanceof Error ? error.message : ''
+  if (/execution-tool-unavailable|plan execution tool.*unavailable/iu.test(message)) {
+    return copy.executionToolUnavailableError
+  }
   if (/not found|does not exist/iu.test(message)) return copy.notFoundError
   if (/terminal|already/iu.test(message)) return copy.alreadyTerminalError
   if (/aborted|aborterror/iu.test(message)) return ''
