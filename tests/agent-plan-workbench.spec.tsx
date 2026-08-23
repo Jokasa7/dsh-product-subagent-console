@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
-  AgentPlanRevision, PlanPreflightResult, PlanRepositorySnapshot,
+  AgentPlanRevision, ExecutionCapabilitySnapshot, PlanPreflightResult, PlanRepositorySnapshot,
 } from '../src/plan-types.js'
 import {
   AGENT_PLAN_WORKBENCH_COPY_EN,
@@ -96,6 +96,45 @@ function pendingWatch(signal: AbortSignal): Promise<PlanRepositorySnapshot> {
   })
 }
 
+function capabilities(): ExecutionCapabilitySnapshot {
+  return {
+    schemaVersion: 1,
+    capturedAt: 1_000,
+    digest: 'capability-one',
+    catalogDigest: 'catalog-one',
+    scopeStatus: 'available',
+    adapters: { workflow: true, agentTeam: false },
+    transportProviders: [{
+      name: 'codex',
+      inheritsParentContext: false,
+      outputSchema: false,
+      depthLimit: false,
+      toolFilter: false,
+      persona: false,
+      continuable: false,
+      modelRouting: 'unsupported',
+      maxTokens: 'unsupported',
+    }],
+    llmRoutes: [],
+    agentPresets: [],
+    tools: ['design_subagent_plan', 'execute_subagent_plan'],
+    plannerTools: {
+      design: ['design_subagent_plan'],
+      execute: ['execute_subagent_plan'],
+    },
+    budgetSupport: {
+      maxAgents: 'enforced',
+      maxConcurrent: 'enforced',
+      planTimeout: 'enforced',
+      requests: 'advisory',
+      tokens: 'advisory',
+      cost: 'unsupported',
+    },
+    limits: { maxAgents: 32, maxConcurrent: 16 },
+    experimentalAgentTeam: false,
+  }
+}
+
 function injected(overrides: Partial<AgentPlanWorkbenchInjected> = {}): AgentPlanWorkbenchInjected {
   const defaultPreflight: PlanPreflightResult = {
     planId,
@@ -118,6 +157,7 @@ function injected(overrides: Partial<AgentPlanWorkbenchInjected> = {}): AgentPla
     })),
     preflightPlan: vi.fn(async () => defaultPreflight),
     approvePlan: vi.fn(async () => revision('approved')),
+    getExecutionCapabilities: vi.fn(async () => capabilities()),
     requestPlanDesign: vi.fn(async () => {}),
     ...overrides,
   }
@@ -194,6 +234,7 @@ describe('Agent plan workbench', () => {
       resolvedBackend: 'workflow',
       valid: true,
       diagnostics: [{
+        diagnosticId: 'advisory-model:frontend',
         severity: 'warning',
         code: 'advisory-model',
         message: 'Model availability is advisory.',
@@ -218,7 +259,7 @@ describe('Agent plan workbench', () => {
         planId,
         revision: 1,
         capabilityDigest: 'capability-one',
-        acceptedWarningCodes: ['advisory-model'],
+        acceptedWarningIds: ['advisory-model:frontend'],
       }, expect.any(AbortSignal))
     })
   })
@@ -277,5 +318,107 @@ describe('Agent plan workbench', () => {
 
     expect((await screen.findAllByDisplayValue('建立全新的人工方案')).length).toBeGreaterThan(0)
     expect(screen.getAllByText('未保存草案').length).toBe(2)
+  })
+
+  it('uses the real configured Provider for a manual executable draft', async () => {
+    const available = capabilities()
+    available.transportProviders = [{
+      ...available.transportProviders[0]!,
+      name: 'fork-provider',
+      inheritsParentContext: true,
+    }]
+    const actions = injected({
+      getExecutionCapabilities: vi.fn(async () => available),
+    })
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByDisplayValue('Release review')
+
+    fireEvent.change(screen.getByPlaceholderText(/并行检查前端/u), {
+      target: { value: '验证真实 Provider' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '手动新建' }))
+    expect((await screen.findAllByDisplayValue('验证真实 Provider')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '保存草案' }))
+
+    await waitFor(() => {
+      expect(actions.savePlan).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.objectContaining({
+          roles: [expect.objectContaining({
+            transportProvider: 'fork-provider',
+            contextMode: 'fork',
+          })],
+        }),
+      }), expect.any(AbortSignal))
+    })
+  })
+
+  it('refuses to invent a Provider when a profile has none', async () => {
+    const emptySnapshot: PlanRepositorySnapshot = { ...snapshot(), plans: [] }
+    const unavailable = capabilities()
+    unavailable.transportProviders = []
+    const actions = injected({
+      listPlans: vi.fn(async () => emptySnapshot),
+      getExecutionCapabilities: vi.fn(async () => unavailable),
+    })
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByText('还没有 Agent 方案')
+
+    fireEvent.click(screen.getByRole('button', { name: '手动新建' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('没有可用的子代理 Provider')
+    expect(screen.getByText('还没有 Agent 方案')).toBeTruthy()
+  })
+
+  it('preserves multiline whitespace while typing and normalizes it only when saving', async () => {
+    const actions = injected()
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByDisplayValue('Release review')
+    fireEvent.click(screen.getByRole('button', { name: 'select-frontend' }))
+    const criteria = await screen.findByLabelText('完成标准') as HTMLTextAreaElement
+
+    fireEvent.change(criteria, { target: { value: '  first item\nsecond item  ' } })
+    expect(criteria.value).toBe('  first item\nsecond item  ')
+    fireEvent.click(screen.getByRole('button', { name: '保存草案' }))
+
+    await waitFor(() => {
+      expect(actions.savePlan).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.objectContaining({
+          tasks: [expect.objectContaining({ completionCriteria: ['first item', 'second item'] })],
+        }),
+      }), expect.any(AbortSignal))
+    })
+  })
+
+  it('keeps role editors open when a plan has more than three roles', async () => {
+    const stored = revision()
+    stored.roles = Array.from({ length: 4 }, (_, index) => ({
+      ...stored.roles[0]!,
+      roleId: `reviewer-${String(index + 1)}`,
+      name: `Reviewer ${String(index + 1)}`,
+    }))
+    stored.tasks[0] = { ...stored.tasks[0]!, roleId: stored.roles[0]!.roleId }
+    const view = render(createElement(AgentPlanWorkbench, {
+      sessionId,
+      injected: injected({ listPlans: vi.fn(async () => snapshot(stored)) }),
+    }))
+    await screen.findByDisplayValue('Release review')
+
+    await waitFor(() => {
+      const cards = [...view.container.querySelectorAll('details')]
+      expect(cards).toHaveLength(4)
+      expect(cards.every(card => card.open)).toBe(true)
+    })
+  })
+
+  it('disables unsupported composition controls for new values', async () => {
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: injected() }))
+    await screen.findByDisplayValue('Release review')
+    expect((await screen.findByLabelText('模型 Provider') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('模型') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('Agent 预设') as HTMLInputElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'select-frontend' }))
+    expect((screen.getByLabelText('此任务执行前需要批准') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('最多 Tokens') as HTMLInputElement).disabled).toBe(true)
   })
 })

@@ -59,7 +59,7 @@
 
 .modeBody {
   min-width: 0;
-  padding: 20px 24px 32px;
+  padding: 20px 24px calc(var(--dsh-composer-height, 152px) + 32px);
 }
 
 .runtimeRoot {

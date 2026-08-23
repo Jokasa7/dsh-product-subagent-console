@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
   AgentPlanRevision,
   CancelPlanExecutionRequest,
   CancelPlanExecutionResult,
   PlanExecution,
+  PlanExecutionGrant,
   PlanExecutionRepositorySnapshot,
   PlanRevisionRequest,
   PlanRunBinding,
@@ -25,7 +26,7 @@ export interface AgentPlanComparisonActions {
   readonly requestExecution: (
     request: PlanRevisionRequest,
     signal: AbortSignal,
-  ) => Promise<void>
+  ) => Promise<PlanExecutionGrant>
   /** Request cancellation for one exact execution owned by the current Session. */
   readonly cancelExecution: (
     request: CancelPlanExecutionRequest,
@@ -70,6 +71,8 @@ const COMPARISON_COPY_ZH_VALUES = {
   noRunnablePlans: '暂无可执行方案',
   submitting: '正在提交…',
   requestExecution: '请求执行',
+  executionPending: '等待执行开始',
+  executionActive: '该修订正在运行',
   cancelling: '正在取消…',
   cancelAlreadyRequested: '已请求取消',
   cancelExecution: '取消执行',
@@ -129,6 +132,8 @@ export const AGENT_PLAN_COMPARISON_COPY_EN: AgentPlanComparisonCopy = {
   noRunnablePlans: 'No approved plans ready to run',
   submitting: 'Submitting…',
   requestExecution: 'Request execution',
+  executionPending: 'Waiting for execution',
+  executionActive: 'Revision is running',
   cancelling: 'Cancelling…',
   cancelAlreadyRequested: 'Cancellation requested',
   cancelExecution: 'Cancel execution',
@@ -150,11 +155,19 @@ export interface AgentPlanComparisonProps {
   readonly plans: readonly AgentPlanRevision[]
   readonly executionSnapshot: PlanExecutionRepositorySnapshot
   readonly actions: AgentPlanComparisonActions
+  /** Pause display-only clocks while the comparison mode is hidden. */
+  readonly active?: boolean
   readonly copy?: AgentPlanComparisonCopy
   readonly canvasCopy?: AgentPlanComparisonCanvasCopy
 }
 
 type ActionState = 'request' | 'cancel' | null
+
+interface PendingExecutionRequest {
+  readonly planKey: string
+  readonly knownExecutionIds: ReadonlySet<string>
+  readonly expiresAt?: number
+}
 
 function liveExecution(execution: PlanExecution): boolean {
   return execution.status === 'queued'
@@ -311,8 +324,9 @@ function AttemptDetails({ binding, now, unresolved, copy }: {
 /** Render exact plan-to-execution bindings with selection, detail, execution request, and cancellation. */
 export function AgentPlanComparison({
   sessionId, plans, executionSnapshot, actions, canvasCopy,
-  copy = AGENT_PLAN_COMPARISON_COPY_ZH,
+  active = true, copy = AGENT_PLAN_COMPARISON_COPY_ZH,
 }: AgentPlanComparisonProps): ReactNode {
+  const detailsId = `${useId()}-details`
   const parentSessionId = String(sessionId)
   const executions = useMemo(() => executionSnapshot.executions
     .filter(execution => execution.parentSessionId === parentSessionId)
@@ -323,6 +337,9 @@ export function AgentPlanComparison({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [action, setAction] = useState<ActionState>(null)
+  const [pendingRequests, setPendingRequests] = useState<ReadonlyMap<string, PendingExecutionRequest>>(
+    () => new Map(),
+  )
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const controller = useRef<AbortController | null>(null)
@@ -332,6 +349,14 @@ export function AgentPlanComparison({
   const selectedPlan = selectedExecution === undefined
     ? undefined
     : findExecutionPlanRevision(plans, selectedExecution)
+  const selectedRunnablePlan = runnablePlans.find(
+    plan => `${plan.planId}@${String(plan.revision)}` === selectedPlanKey,
+  )
+  const selectedPlanRunning = selectedRunnablePlan !== undefined && executions.some(execution => (
+    execution.planId === selectedRunnablePlan.planId
+    && execution.planRevision === selectedRunnablePlan.revision
+    && liveExecution(execution)
+  ))
   const graph = useMemo(() => selectedExecution === undefined
     ? undefined
     : buildPlanComparisonGraph(selectedExecution, selectedPlan), [selectedExecution, selectedPlan])
@@ -373,11 +398,42 @@ export function AgentPlanComparison({
   useEffect(() => () => { controller.current?.abort() }, [])
 
   useEffect(() => {
+    if (pendingRequests.size === 0) return
+    const observedAt = Date.now()
+    const next = new Map(pendingRequests)
+    let changed = false
+    let nextExpiry = Number.POSITIVE_INFINITY
+    for (const [planKey, pending] of pendingRequests) {
+      const observed = executions.some(execution => (
+        `${execution.planId}@${String(execution.planRevision)}` === planKey
+        && !pending.knownExecutionIds.has(execution.executionId)
+      ))
+      const expired = pending.expiresAt !== undefined && pending.expiresAt <= observedAt
+      if (observed || expired) {
+        next.delete(planKey)
+        changed = true
+      } else if (pending.expiresAt !== undefined) {
+        nextExpiry = Math.min(nextExpiry, pending.expiresAt)
+      }
+    }
+    if (changed) {
+      setPendingRequests(next)
+      return
+    }
+    if (!Number.isFinite(nextExpiry)) return
+    const timer = setTimeout(() => {
+      setPendingRequests(current => new Map(current))
+    }, Math.max(1, nextExpiry - observedAt))
+    return () => { clearTimeout(timer) }
+  }, [executions, pendingRequests])
+
+  useEffect(() => {
+    if (!active) return
     if (selectedExecution === undefined) return
     if (!liveExecution(selectedExecution) && !selectedExecution.bindings.some(liveAttempt)) return
     const timer = setInterval(() => { setNow(Date.now()) }, 1_000)
     return () => { clearInterval(timer) }
-  }, [selectedExecution])
+  }, [active, selectedExecution])
 
   const beginAction = (next: Exclude<ActionState, null>): AbortSignal => {
     controller.current?.abort()
@@ -397,15 +453,37 @@ export function AgentPlanComparison({
   const requestExecution = async (): Promise<void> => {
     const plan = runnablePlans.find(item => `${item.planId}@${String(item.revision)}` === selectedPlanKey)
     if (plan === undefined) return
+    const planKey = `${plan.planId}@${String(plan.revision)}`
     const signal = beginAction('request')
     try {
-      await actions.requestExecution({
+      const knownExecutionIds = new Set(executions
+        .filter(execution => `${execution.planId}@${String(execution.planRevision)}` === planKey)
+        .map(execution => execution.executionId))
+      setPendingRequests(current => {
+        const next = new Map(current)
+        next.set(planKey, { planKey, knownExecutionIds })
+        return next
+      })
+      const grant = await actions.requestExecution({
         parentSessionId,
         planId: plan.planId,
         revision: plan.revision,
       }, signal)
+      setPendingRequests(current => {
+        const pending = current.get(planKey)
+        if (pending === undefined) return current
+        const next = new Map(current)
+        next.set(planKey, { ...pending, expiresAt: grant.expiresAt })
+        return next
+      })
       setMessage(formatCopy(copy.executionRequested, { title: plan.title, revision: plan.revision }))
     } catch (reason: unknown) {
+      setPendingRequests(current => {
+        if (!current.has(planKey)) return current
+        const next = new Map(current)
+        next.delete(planKey)
+        return next
+      })
       const safe = safeActionMessage(reason, copy)
       if (safe.length > 0) setError(safe)
     } finally {
@@ -483,9 +561,18 @@ export function AgentPlanComparison({
         <div className={css.toolbarActions}>
           <button
             type="button"
-            disabled={selectedPlanKey.length === 0 || action !== null}
+            disabled={selectedPlanKey.length === 0
+              || action !== null
+              || pendingRequests.has(selectedPlanKey)
+              || selectedPlanRunning}
             onClick={() => { void requestExecution() }}
-          >{action === 'request' ? copy.submitting : copy.requestExecution}</button>
+          >{action === 'request'
+              ? copy.submitting
+              : selectedPlanRunning
+                ? copy.executionActive
+                : pendingRequests.has(selectedPlanKey)
+                  ? copy.executionPending
+                  : copy.requestExecution}</button>
           <button
             type="button"
             className={css.cancelButton}
@@ -527,11 +614,12 @@ export function AgentPlanComparison({
                 selectedNodeId={selectedNode?.id ?? null}
                 onSelect={setSelectedNodeId}
                 now={now}
+                detailsId={detailsId}
                 {...(canvasCopy === undefined ? {} : { copy: canvasCopy })}
               />
             </div>
             <aside
-              id="agent-plan-comparison-details"
+              id={detailsId}
               className={css.details}
               aria-label={copy.detailsAria}
             >

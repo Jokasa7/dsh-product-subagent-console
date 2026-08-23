@@ -1,6 +1,6 @@
 {
   "name": "dsh-product-subagent-console",
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "description": "Plan, run, and compare multi-Agent work inside DeepSeek Harness conversations",
   "type": "module",
   "main": "./lib/index.js",
@@ -58,6 +58,7 @@
     "docs/agent-planner.zh.md",
     "docs/troubleshooting.md",
     "docs/troubleshooting.zh.md",
+    "docs/assets/agent-plan-en.jpg",
     "docs/assets/subagent-canvas-live.jpg",
     "LICENSE",
     "NOTICE",
@@ -81,13 +82,15 @@
     "clean": "node scripts/clean.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "verify:public": "node scripts/verify-public-tree.mjs",
     "verify:dist": "node scripts/verify-dist.mjs",
     "verify:pack": "node scripts/verify-pack.mjs",
     "build:artifacts": "pnpm run clean && tsc -p tsconfig.build.json && tsdown && pnpm run verify:dist",
-    "build": "pnpm run typecheck && pnpm run test && pnpm run build:artifacts",
+    "build": "pnpm run verify:public && pnpm run typecheck && pnpm run test && pnpm run build:artifacts",
     "prepare": "pnpm run build:artifacts",
     "prepack": "pnpm run build",
     "pack:check": "pnpm run build:artifacts && pnpm run verify:pack",
+    "smoke:web": "node scripts/smoke-clean-profile.mjs",
     "publint": "publint"
   },
   "engines": {
@@ -118,8 +121,8 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "3.1.1",
-    "@deepseek-ai/schemastery": "3.18.1",
     "@deepseek-ai/dsh-workflow-worker-thread": "0.1.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.1",
     "@xyflow/react": "12.11.3",
     "zod": "^4.4.3"
   },
@@ -147,6 +150,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh": "0.1.1-rc.2",
     "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
@@ -160,6 +164,7 @@
     "@deepseek-ai/dsh-subagent": "0.1.1-rc.2",
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/dsh-workflow": "0.1.1-rc.2",
+    "@playwright/test": "1.62.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",

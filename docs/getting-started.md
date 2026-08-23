@@ -10,7 +10,7 @@ This guide installs DSH Product Subagent Console and enables its Runtime, Plan, 
 - Node.js `^22.19.0` or `>=24.0.0`
 - A working DSH Web profile
 
-Install a compatible Provider Bundle only when a delegated task or plan uses that external coding Agent.
+An external Provider is optional when you only inspect native DSH child sessions. Creating and executing a plan currently requires at least one installed and configured compatible subagent Provider.
 
 ## Install
 
@@ -20,7 +20,7 @@ Verify and install the archive:
 
 ```sh
 sha256sum --check SHA256SUMS.txt
-dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.1.tgz
+dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
 dsh --profile web --dump-config
 ```
 
@@ -29,7 +29,7 @@ The configuration output should contain `product-subagent-console`. Restart the 
 On Windows PowerShell, compare the following result with `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\dsh-product-subagent-console-0.4.0-alpha.1.tgz -Algorithm SHA256
+Get-FileHash .\dsh-product-subagent-console-0.4.0-alpha.2.tgz -Algorithm SHA256
 ```
 
 ## Add an external Provider
@@ -71,9 +71,9 @@ The **Subagents** tab has three modes:
 
 - **Runtime** shows current and completed delegated runs. Pan, zoom, rearrange cards, select a card for details, or open a native child conversation.
 - **Plan** generates or manually creates an Agent plan. Edit the draft, save it, run preflight, review warnings, and approve the exact revision you want to run.
-- **Compare** starts an approved plan and shows each planned task beside its actual attempt. You can inspect status and timing or request cancellation while the execution is active.
+- **Compare** asks the current conversation to execute an approved plan and shows each planned task beside its actual execution attempt. You can inspect status and timing or request cancellation while the execution is active.
 
-Plans and execution history are temporary for the current Host run. See [Agent Planner](agent-planner.md) for the complete plan workflow.
+Plans and execution history are temporary for the current DSH Web process. See [Agent Planner](agent-planner.md) for the complete plan workflow.
 
 ## Update
 

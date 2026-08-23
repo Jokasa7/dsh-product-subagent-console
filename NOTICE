@@ -7,7 +7,7 @@ Copyright (c) 2026 DeepSeek. It does not distribute a complete or patched
 Harness application; the installed DSH runtime packages remain separate peer
 dependencies.
 
-The browser artifact privately bundles third-party open-source dependencies.
+The browser artifact bundles third-party open-source dependencies.
 Their versions, copyright notices, and license texts are provided in
 THIRD_PARTY_NOTICES.md.
 

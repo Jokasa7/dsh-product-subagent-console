@@ -23,6 +23,25 @@ const CLIENT_EXTERNALS = new Set([
   '@deepseek-ai/dsh-client-ui-slots',
 ])
 
+const CLIENT_BUNDLED_DEPENDENCIES = [
+  '@dagrejs/dagre',
+  '@xyflow/react',
+  '@xyflow/system',
+  'classcat',
+  'd3-color',
+  'd3-dispatch',
+  'd3-drag',
+  'd3-ease',
+  'd3-interpolate',
+  'd3-selection',
+  'd3-timer',
+  'd3-transition',
+  'd3-zoom',
+  'use-sync-external-store',
+  'zod',
+  'zustand',
+] as const
+
 function isBareSpecifier(specifier: string): boolean {
   return !specifier.startsWith('.') && !specifier.startsWith('\0') && !isAbsolute(specifier)
 }
@@ -150,6 +169,7 @@ const clientConfig: UserConfig = {
   deps: {
     neverBundle: specifier => isClientExternal(specifier),
     alwaysBundle: specifier => !isClientExternal(specifier),
+    onlyBundle: [...CLIENT_BUNDLED_DEPENDENCIES],
   },
   plugins: [cssPlugin],
   inputOptions: {

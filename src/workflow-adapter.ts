@@ -9,6 +9,7 @@ import {
   type PlanPreflightResult,
   type TransportProviderCapability,
 } from './plan-types.js'
+import { outputSchemaError } from './plan-validation.js'
 import {
   PlanExecutionTracker,
   isTerminalPlanExecutionStatus,
@@ -726,8 +727,14 @@ function validateStart<Parent>(input: WorkflowPlanExecutionStart<Parent>): {
   }
   for (const task of plan.tasks) {
     if (task.approvalRequired) throw new Error(`Workflow cannot pause for approval at task "${task.title}"`)
-    if (task.expectedOutput.schema !== undefined && !transport.outputSchema) {
-      throw new Error(`transport Provider "${transport.name}" cannot enforce task output schemas`)
+    if (task.expectedOutput.schema !== undefined) {
+      const schemaError = outputSchemaError(task.expectedOutput.schema)
+      if (schemaError !== undefined) {
+        throw new Error(`task "${task.title}" has an unsupported output schema: ${schemaError}`)
+      }
+      if (!transport.outputSchema) {
+        throw new Error(`transport Provider "${transport.name}" cannot enforce task output schemas`)
+      }
     }
     if (task.budgetHint !== undefined) {
       throw new Error(`Workflow cannot enforce the task budget hint for "${task.title}"`)

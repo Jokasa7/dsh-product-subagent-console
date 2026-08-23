@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto'
 import {
   agentPlanContentSchema,
   agentPlanRevisionSchema,
+  assertBoundedJsonValue,
   MAX_PLAN_BYTES,
   type AgentPlanContent,
   type AgentPlanRevision,
   type PlanPreflightResult,
 } from './plan-types.js'
+import { outputSchemaError } from './plan-validation.js'
 
 /** Optimistic-concurrency failure raised instead of overwriting another saved revision. */
 export class PlanRevisionConflictError extends Error {
@@ -85,7 +87,7 @@ export class AgentPlanRepository {
 
   /** Save a new draft revision using exact compare-and-swap semantics. */
   saveDraft(input: SavePlanDraftInput): AgentPlanRevision {
-    const content = agentPlanContentSchema.parse(input.content)
+    const content = canonicalPlanContent(input.content)
     if (encodedBytes(content) > MAX_PLAN_BYTES) {
       throw new Error(`agent plan exceeds ${String(MAX_PLAN_BYTES)} encoded bytes`)
     }
@@ -158,7 +160,7 @@ export class AgentPlanRepository {
     readonly planId: string
     readonly revision: number
     readonly preflight: PlanPreflightResult
-    readonly acceptedWarningCodes: readonly string[]
+    readonly acceptedWarningIds: readonly string[]
   }): AgentPlanRevision {
     const record = this.ownedRecord(input.parentSessionId, input.planId)
     const latest = record.revisions.at(-1)
@@ -176,10 +178,10 @@ export class AgentPlanRepository {
     if (!input.preflight.valid || input.preflight.diagnostics.some(item => item.severity === 'error')) {
       throw new PlanApprovalError('plan has blocking preflight errors')
     }
-    const accepted = new Set(input.acceptedWarningCodes)
+    const accepted = new Set(input.acceptedWarningIds)
     const unaccepted = input.preflight.diagnostics
-      .filter(item => item.severity === 'warning' && !accepted.has(item.code))
-      .map(item => item.code)
+      .filter(item => item.severity === 'warning' && !accepted.has(item.diagnosticId))
+      .map(item => item.diagnosticId)
     if (unaccepted.length > 0) {
       throw new PlanApprovalError(`unaccepted plan warnings: ${unaccepted.join(', ')}`)
     }
@@ -188,7 +190,7 @@ export class AgentPlanRepository {
       state: 'approved',
       updatedAt: Date.now(),
       capabilityDigest: input.preflight.capabilityDigest,
-      acceptedWarningCodes: [...accepted].sort(),
+      acceptedWarningIds: [...accepted].sort(),
     })
     const delta = encodedBytes(approved) - encodedBytes(latest)
     this.assertTotalCapacity(delta)
@@ -247,4 +249,20 @@ function encodedBytes(value: unknown): number {
   const encoded = JSON.stringify(value)
   if (encoded === undefined) throw new Error('agent plan is not JSON serializable')
   return new TextEncoder().encode(encoded).byteLength
+}
+
+function canonicalPlanContent(value: unknown): AgentPlanContent {
+  assertBoundedJsonValue(value)
+  const parsed = agentPlanContentSchema.parse(value)
+  for (const task of parsed.tasks) {
+    if (task.expectedOutput.schema === undefined) continue
+    const schemaError = outputSchemaError(task.expectedOutput.schema)
+    if (schemaError !== undefined) {
+      throw new Error(`task "${task.taskId}" has an unsupported output schema: ${schemaError}`)
+    }
+  }
+  assertBoundedJsonValue(parsed)
+  const encoded = JSON.stringify(parsed)
+  if (encoded === undefined) throw new Error('agent plan is not JSON serializable')
+  return agentPlanContentSchema.parse(JSON.parse(encoded))
 }

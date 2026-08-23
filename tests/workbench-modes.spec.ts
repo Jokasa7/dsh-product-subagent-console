@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createElement } from 'react'
+import { createElement, useState } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -21,7 +21,16 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 vi.mock('../src/client/AgentPlanWorkbench.js', () => ({
   AGENT_PLAN_WORKBENCH_COPY_EN: {},
   AGENT_PLAN_WORKBENCH_COPY_ZH: {},
-  AgentPlanWorkbench: () => createElement('div', { 'data-testid': 'planner-mode' }, 'Planner mode'),
+  AgentPlanWorkbench: ({ sessionId: owner }: { readonly sessionId: SessionId }) => {
+    const [value, setValue] = useState('')
+    return createElement('div', { 'data-testid': 'planner-mode' },
+      createElement('span', {}, String(owner)),
+      createElement('input', {
+        'aria-label': 'draft-value',
+        value,
+        onChange: (event: { currentTarget: { value: string } }) => { setValue(event.currentTarget.value) },
+      }))
+  },
 }))
 
 vi.mock('../src/client/AgentPlanComparison.js', () => ({
@@ -52,12 +61,12 @@ function translate(key: ProductSubagentsLocaleKey, values?: Record<string, unkno
   return value
 }
 
-function emptySessionState(): SessionListState {
+function emptySessionState(owner = sessionId): SessionListState {
   return {
-    ids: [sessionId],
+    ids: [owner],
     byId: {
-      [sessionId]: {
-        id: sessionId,
+      [owner]: {
+        id: owner,
         displayTitle: 'Parent',
         running: true,
         blank: false,
@@ -65,7 +74,7 @@ function emptySessionState(): SessionListState {
         projectionValues: {},
       },
     },
-    current: sessionId,
+    current: owner,
     phase: 'ready',
     subagentsByParent: {},
     jobsBySession: {},
@@ -81,11 +90,11 @@ function waitForAbort(signal: AbortSignal): Promise<never> {
   })
 }
 
-function props(): SubagentWorkbenchProps {
-  const sessions = emptySessionState()
+function props(owner = sessionId): SubagentWorkbenchProps {
+  const sessions = emptySessionState(owner)
   const useSessions: SubagentWorkbenchProps['useSessions'] = selector => selector(sessions)
   return {
-    sessionId,
+    sessionId: owner,
     t: translate as SubagentWorkbenchProps['t'],
     useSessions,
     listSessions: vi.fn(async () => ({
@@ -160,5 +169,55 @@ describe('three-mode conversation workbench', () => {
     })
     expect(injected.listPlans).toHaveBeenCalledWith([sessionId], expect.any(AbortSignal))
     expect(injected.listPlanExecutions).toHaveBeenCalledWith([sessionId], expect.any(AbortSignal))
+  })
+
+  it('preserves a draft between modes but resets it when the owning Session changes', async () => {
+    const first = props()
+    const view = render(createElement(SubagentWorkbenchView, first))
+    fireEvent.click(screen.getByRole('tab', { name: 'Plan' }))
+    const input = await screen.findByLabelText('draft-value') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'session A draft' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Compare' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Plan' }))
+    expect((screen.getByLabelText('draft-value') as HTMLInputElement).value).toBe('session A draft')
+
+    const secondId = 'parent-b' as SessionId
+    view.rerender(createElement(SubagentWorkbenchView, props(secondId)))
+    expect((await screen.findByLabelText('draft-value') as HTMLInputElement).value).toBe('')
+    expect(screen.getByText(String(secondId))).toBeTruthy()
+  })
+
+  it('aborts hidden mode watchers and keeps generated DOM ids unique', async () => {
+    const first = props()
+    const second = props('parent-b' as SessionId)
+    const view = render(createElement('div', {},
+      createElement(SubagentWorkbenchView, first),
+      createElement(SubagentWorkbenchView, second),
+    ))
+    await waitFor(() => { expect(first.watchSessions).toHaveBeenCalled() })
+    const runtimeSignal = (first.watchSessions as unknown as {
+      readonly mock: { readonly calls: readonly (readonly unknown[])[] }
+    }).mock.calls[0]?.[3] as AbortSignal
+    const firstWorkbench = view.container.querySelectorAll('[data-subagent-workbench]')[0]
+    const firstTabs = firstWorkbench?.querySelectorAll<HTMLElement>('[role="tab"]')
+    fireEvent.click(firstTabs?.[1] as HTMLElement)
+    await waitFor(() => { expect(runtimeSignal.aborted).toBe(true) })
+
+    const ids = [...view.container.querySelectorAll<HTMLElement>('[id]')].map(element => element.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const element of view.container.querySelectorAll<HTMLElement>('[aria-controls], [aria-labelledby]')) {
+      const reference = element.getAttribute('aria-controls') ?? element.getAttribute('aria-labelledby')
+      if (reference !== null) expect(document.getElementById(reference)).toBeTruthy()
+    }
+  })
+
+  it('contains a rejected native refresh and allows an explicit retry', async () => {
+    const injected = props()
+    const refreshNative = vi.fn(async () => { throw new Error('refresh unavailable') })
+    const view = render(createElement(SubagentWorkbenchView, { ...injected, refreshNative }))
+    await waitFor(() => { expect(refreshNative).toHaveBeenCalledOnce() })
+
+    fireEvent.click(view.getByRole('button', { name: 'Refresh subagents' }))
+    await waitFor(() => { expect(refreshNative.mock.calls.length).toBeGreaterThanOrEqual(2) })
   })
 })

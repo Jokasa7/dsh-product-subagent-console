@@ -19,6 +19,7 @@ import {
   ProductSubagentLedger,
   type ExecutionObservation,
 } from './domain.js'
+import { collectLlmRoutes, LlmModelCatalogCache } from './capability-catalog.js'
 import { preflightAgentPlan } from './plan-preflight.js'
 import {
   PlanExecutionOwnershipError,
@@ -41,10 +42,13 @@ import {
 import {
   APPROVE_PLAN_ENDPOINT,
   approvePlanRequestSchema,
+  assertBoundedJsonValue,
   CANCEL_PLAN_EXECUTION_ENDPOINT,
   cancelPlanExecutionRequestSchema,
   EXECUTION_CAPABILITIES_ENDPOINT,
   executionCapabilitiesRequestSchema,
+  executionCapabilitySnapshotSchema,
+  ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT,
   LIST_PLANS_ENDPOINT,
   LIST_PLAN_EXECUTIONS_ENDPOINT,
   listPlanExecutionsRequestSchema,
@@ -61,6 +65,7 @@ import {
   type AgentPlanRevision,
   type CancelPlanExecutionResult,
   type PlanExecution,
+  type PlanExecutionGrant,
   type PlanExecutionRepositorySnapshot,
   type PlanRepositorySnapshot,
 } from './plan-types.js'
@@ -79,6 +84,27 @@ export type * from './types.js'
 export type * from './plan-types.js'
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
+const EXECUTION_GRANT_TTL_MS = 12 * 60 * 60_000
+const MAX_CAPABILITY_NAME_LENGTH = 128
+
+function normalizedCapabilityName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  return normalized.length >= 1 && normalized.length <= MAX_CAPABILITY_NAME_LENGTH
+    ? normalized
+    : undefined
+}
+
+function normalizedCapabilityNames(values: readonly unknown[], limit: number): string[] {
+  return [...new Set(values.flatMap(value => {
+    const normalized = normalizedCapabilityName(value)
+    return normalized === undefined ? [] : [normalized]
+  }))].sort().slice(0, limit)
+}
+
+function executionPlanKey(parentSessionId: string, planId: string, revision: number): string {
+  return `${parentSessionId}\u0000${planId}\u0000${String(revision)}`
+}
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -130,6 +156,10 @@ interface OwnedSignal {
   readonly dispose: () => void
 }
 
+interface ExecutionGrantRecord extends PlanExecutionGrant {
+  readonly planKey: string
+}
+
 type ConsoleRpcResponse = Awaited<ReturnType<ConnectionRpcHandler>>
 
 /** Standalone Host service for observed lifecycle records and owned-tool admission. */
@@ -152,6 +182,12 @@ export class ProductSubagentConsoleService extends Service {
   private readonly ledger: ProductSubagentLedger
   private readonly plans: AgentPlanRepository
   private readonly executions: PlanExecutionSnapshotRepository
+  private readonly executionGrants = new Map<string, ExecutionGrantRecord>()
+  private readonly grantByPlanKey = new Map<string, string>()
+  private readonly activePlanExecutions = new Set<string>()
+  private readonly llmModelCatalog = new LlmModelCatalogCache()
+  private readonly plannerDesignToolNames = new Set<string>()
+  private readonly plannerExecuteToolNames = new Set<string>()
   private readonly listeners = new Set<() => void>()
   private readonly ownedControllers = new Set<AbortController>()
   private workflowAdapter: WorkflowPlanExecutionAdapter<Agent> | undefined
@@ -320,30 +356,140 @@ export class ProductSubagentConsoleService extends Service {
     return this.plans.saveDraft(input)
   }
 
+  /** Register the model-facing planner tool names owned by one plan-tool instance. */
+  registerPlannerToolNames(designToolName: string, executeToolName: string): () => void {
+    this.plannerDesignToolNames.add(designToolName)
+    this.plannerExecuteToolNames.add(executeToolName)
+    return () => {
+      this.plannerDesignToolNames.delete(designToolName)
+      this.plannerExecuteToolNames.delete(executeToolName)
+    }
+  }
+
+  /** Issue one short-lived, one-time grant after an explicit browser execution request. */
+  async issuePlanExecutionGrant(
+    parentSessionId: string,
+    planId: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<PlanExecutionGrant> {
+    this.pruneExecutionGrants()
+    const plan = this.plans.get(parentSessionId, planId, revision)
+    if (plan === undefined) throw new Error('approved Agent plan revision was not found')
+    if (plan.state !== 'approved') throw new Error('only an approved Agent plan revision can receive an execution grant')
+    const planKey = executionPlanKey(parentSessionId, planId, revision)
+    if (this.activePlanExecutions.has(planKey)) {
+      throw new Error('this Agent plan revision already has an active execution')
+    }
+    const capabilities = await this.executionCapabilities(parentSessionId, signal)
+    if (!capabilities.adapters.workflow) {
+      throw new Error('Workflow execution is unavailable in this DSH profile')
+    }
+    const executeToolName = capabilities.plannerTools?.execute.find(name => capabilities.tools.includes(name))
+    if (capabilities.scopeStatus !== 'available') {
+      throw new Error('the current Agent scope is unavailable')
+    }
+    if (executeToolName === undefined) {
+      throw new Error('the plan execution tool is unavailable in the current Agent scope')
+    }
+    if (plan.capabilityDigest !== capabilities.digest) {
+      throw new Error('execution capabilities changed after approval')
+    }
+    const preflight = preflightAgentPlan(plan, capabilities)
+    if (!preflight.valid) throw new PlanApprovalError('approved Agent plan no longer passes preflight')
+    this.pruneExecutionGrants()
+    const previousGrantId = this.grantByPlanKey.get(planKey)
+    const previousGrant = previousGrantId === undefined
+      ? undefined
+      : this.executionGrants.get(previousGrantId)
+    if (previousGrant !== undefined) {
+      const { planKey: _planKey, ...publicGrant } = previousGrant
+      return publicGrant
+    }
+    if (this.executionGrants.size >= 256) {
+      throw new Error('execution grant capacity reached; wait for existing grants to expire')
+    }
+    const grant: ExecutionGrantRecord = {
+      grantId: randomUUID(),
+      parentSessionId,
+      planId,
+      revision,
+      capabilityDigest: capabilities.digest,
+      executeToolName,
+      expiresAt: Date.now() + EXECUTION_GRANT_TTL_MS,
+      planKey,
+    }
+    this.executionGrants.set(grant.grantId, grant)
+    this.grantByPlanKey.set(planKey, grant.grantId)
+    const { planKey: _planKey, ...publicGrant } = grant
+    return publicGrant
+  }
+
   /** Execute one approved exact revision through the currently available official Workflow service. */
   async executeApprovedPlan(
     parent: Agent,
     planId: string,
     revision: number,
+    grantId: string,
     signal: AbortSignal,
   ): Promise<PlanExecution> {
     const parentSessionId = String(parent.id)
-    const plan = this.plans.get(parentSessionId, planId, revision)
-    if (plan === undefined) throw new Error('approved Agent plan revision was not found')
-    if (plan.state !== 'approved') throw new Error('only an approved Agent plan revision can execute')
-    const adapter = this.workflowAdapter
-    if (adapter === undefined) throw new Error('Workflow execution is unavailable in this DSH profile')
-    const capabilities = await this.executionCapabilities(parentSessionId)
-    const preflight = preflightAgentPlan(plan, capabilities)
-    const run = adapter.start({ parent, plan, preflight, capabilities, signal })
-    // The adapter-wide subscription normally publishes this initial state;
-    // this explicit upsert closes any mount/listener scheduling race.
-    this.executions.upsert(run.snapshot())
+    const planKey = executionPlanKey(parentSessionId, planId, revision)
+    this.consumeExecutionGrant(parentSessionId, planId, revision, grantId)
+    if (this.activePlanExecutions.has(planKey)) {
+      throw new Error('this Agent plan revision already has an active execution')
+    }
+    this.activePlanExecutions.add(planKey)
     try {
-      return await run.result
-    } finally {
-      await run.dispose()
+      const plan = this.plans.get(parentSessionId, planId, revision)
+      if (plan === undefined) throw new Error('approved Agent plan revision was not found')
+      if (plan.state !== 'approved') throw new Error('only an approved Agent plan revision can execute')
+      const adapter = this.workflowAdapter
+      if (adapter === undefined) throw new Error('Workflow execution is unavailable in this DSH profile')
+      const capabilities = await this.executionCapabilities(parentSessionId, signal)
+      const preflight = preflightAgentPlan(plan, capabilities)
+      const run = adapter.start({ parent, plan, preflight, capabilities, signal })
+      // The adapter-wide subscription normally publishes this initial state;
+      // this explicit upsert closes any mount/listener scheduling race.
       this.executions.upsert(run.snapshot())
+      try {
+        return await run.result
+      } finally {
+        await run.dispose()
+        this.executions.upsert(run.snapshot())
+      }
+    } finally {
+      this.activePlanExecutions.delete(planKey)
+    }
+  }
+
+  private consumeExecutionGrant(
+    parentSessionId: string,
+    planId: string,
+    revision: number,
+    grantId: string,
+  ): void {
+    this.pruneExecutionGrants()
+    const grant = this.executionGrants.get(grantId)
+    if (grant === undefined) throw new Error('a valid execution grant is required')
+    this.executionGrants.delete(grantId)
+    if (this.grantByPlanKey.get(grant.planKey) === grantId) this.grantByPlanKey.delete(grant.planKey)
+    if (
+      grant.expiresAt <= Date.now()
+      || grant.parentSessionId !== parentSessionId
+      || grant.planId !== planId
+      || grant.revision !== revision
+    ) {
+      throw new Error('execution grant is expired or does not match this plan revision')
+    }
+  }
+
+  private pruneExecutionGrants(): void {
+    const now = Date.now()
+    for (const [grantId, grant] of this.executionGrants) {
+      if (grant.expiresAt > now) continue
+      this.executionGrants.delete(grantId)
+      if (this.grantByPlanKey.get(grant.planKey) === grantId) this.grantByPlanKey.delete(grant.planKey)
     }
   }
 
@@ -362,45 +508,77 @@ export class ProductSubagentConsoleService extends Service {
   }
 
   /** Discover the exact public capabilities currently enforceable by this plugin Host. */
-  async executionCapabilities(parentSessionId: string): Promise<ExecutionCapabilitySnapshot> {
-    const transportProviders = this.ctx.subagents.list()
-      .map(name => this.ctx.subagents.getProvider(name))
-      .filter(provider => provider !== undefined)
-      .map(provider => ({
-        name: provider.name,
+  async executionCapabilities(
+    parentSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<ExecutionCapabilitySnapshot> {
+    const transportProvidersByName = new Map<string, ExecutionCapabilitySnapshot['transportProviders'][number]>()
+    for (const registeredName of this.ctx.subagents.list()) {
+      const provider = this.ctx.subagents.getProvider(registeredName)
+      const name = normalizedCapabilityName(provider?.name)
+      if (provider === undefined || name === undefined || transportProvidersByName.has(name)) continue
+      transportProvidersByName.set(name, {
+        name,
         inheritsParentContext: provider.inheritsParentContext,
         outputSchema: provider.capabilities.outputSchema,
         depthLimit: provider.capabilities.depthLimit,
         toolFilter: provider.capabilities.toolFilter,
         persona: provider.capabilities.persona,
         continuable: provider.prepareContinuable !== undefined,
-        modelRouting: 'unsupported' as const,
-        maxTokens: 'unsupported' as const,
-      }))
+        modelRouting: 'unsupported',
+        maxTokens: 'unsupported',
+      })
+    }
+    const transportProviders = [...transportProvidersByName.values()]
       .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, 128)
     const llm = this.ctx.get('llm')
-    const llmRoutes = llm === undefined ? [] : await Promise.all(llm.listProviders().map(async (provider) => {
+    let llmRoutes: ExecutionCapabilitySnapshot['llmRoutes'] = []
+    if (llm !== undefined) {
+      let providerIds: string[] = []
       try {
-        const models = await llm.listModels(provider.id)
-        return {
-          provider: provider.id,
-          models: models.map(model => model.id).sort(),
-          catalogStatus: 'available' as const,
-        }
+        providerIds = llm.listProviders().map(provider => provider.id)
       } catch {
-        return { provider: provider.id, models: [], catalogStatus: 'unavailable' as const }
+        providerIds = []
       }
-    }))
-    llmRoutes.sort((left, right) => left.provider.localeCompare(right.provider))
+      llmRoutes = await collectLlmRoutes(
+        providerIds,
+        async provider => await this.llmModelCatalog.load(
+          provider,
+          async providerId => await llm.listModels(providerId),
+        ),
+        signal,
+      )
+    }
     const parent = this.ctx.get('agents')?.get(parentSessionId as SessionId)
     const scopeStatus = parent === undefined ? 'unavailable' as const : 'available' as const
-    const tools = parent === undefined ? [] : this.ctx.tools.schemas(parent).map(tool => tool.name).sort()
-    const payload = {
+    const plannerTools = {
+      design: normalizedCapabilityNames([...this.plannerDesignToolNames], 32),
+      execute: normalizedCapabilityNames([...this.plannerExecuteToolNames], 32),
+    }
+    const registeredPlannerTools = normalizedCapabilityNames([
+      ...plannerTools.design,
+      ...plannerTools.execute,
+    ], 64)
+    const scopedTools = parent === undefined
+      ? []
+      : normalizedCapabilityNames(this.ctx.tools.schemas(parent).map(tool => tool.name), Number.MAX_SAFE_INTEGER)
+    const scopedToolSet = new Set(scopedTools)
+    const requiredPlannerTools = registeredPlannerTools.filter(name => scopedToolSet.has(name))
+    const requiredPlannerToolSet = new Set(requiredPlannerTools)
+    const tools = parent === undefined ? [] : [
+      ...requiredPlannerTools,
+      ...scopedTools.filter(name => !requiredPlannerToolSet.has(name)),
+    ].slice(0, 1_024)
+    const base = executionCapabilitySnapshotSchema.omit({ digest: true, catalogDigest: true }).parse({
+      schemaVersion: 1,
+      capturedAt: Date.now(),
       adapters: { workflow: this.workflowAdapter !== undefined, agentTeam: false },
       transportProviders,
       llmRoutes,
       agentPresets: [] as string[],
       tools,
+      plannerTools,
       budgetSupport: {
         maxAgents: 'enforced' as const,
         maxConcurrent: 'enforced' as const,
@@ -415,12 +593,14 @@ export class ProductSubagentConsoleService extends Service {
       },
       experimentalAgentTeam: false,
       scopeStatus,
-    }
+    })
+    const { schemaVersion: _schemaVersion, capturedAt: _capturedAt, ...payload } = base
     const enforcementPayload = {
       adapters: payload.adapters,
       transportProviders: payload.transportProviders,
       llmProviders: payload.llmRoutes.map(route => route.provider),
       tools: payload.tools,
+      plannerTools: payload.plannerTools,
       budgetSupport: payload.budgetSupport,
       limits: payload.limits,
       experimentalAgentTeam: payload.experimentalAgentTeam,
@@ -428,13 +608,11 @@ export class ProductSubagentConsoleService extends Service {
     }
     const digest = createHash('sha256').update(JSON.stringify(enforcementPayload)).digest('hex')
     const catalogDigest = createHash('sha256').update(JSON.stringify(payload)).digest('hex')
-    return {
-      schemaVersion: 1,
-      capturedAt: Date.now(),
+    return executionCapabilitySnapshotSchema.parse({
+      ...base,
       digest,
       catalogDigest,
-      ...payload,
-    }
+    })
   }
 
   /**
@@ -570,6 +748,19 @@ export class ProductSubagentConsoleService extends Service {
         }
         return { ok: true, value: this.executionSnapshot(parsed.data.parentSessionIds) }
       }
+      if (endpoint === ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT) {
+        const parsed = planRevisionRequestSchema.safeParse(payload)
+        if (!parsed.success) return invalidPlannerRequest(parsed.error.issues)
+        return {
+          ok: true,
+          value: await this.issuePlanExecutionGrant(
+            parsed.data.parentSessionId,
+            parsed.data.planId,
+            parsed.data.revision,
+            signal,
+          ),
+        }
+      }
       if (endpoint === CANCEL_PLAN_EXECUTION_ENDPOINT) {
         const parsed = cancelPlanExecutionRequestSchema.safeParse(payload)
         if (!parsed.success) return invalidPlannerRequest(parsed.error.issues)
@@ -600,6 +791,11 @@ export class ProductSubagentConsoleService extends Service {
         return { ok: true, value: this.planSnapshot(parsed.data.parentSessionIds) }
       }
       if (endpoint === SAVE_PLAN_ENDPOINT) {
+        try {
+          assertBoundedJsonValue(payload, 272 * 1024)
+        } catch {
+          return plannerRpcError('invalid-request', 'agent plan payload is not bounded JSON')
+        }
         const parsed = savePlanRequestSchema.safeParse(payload)
         if (!parsed.success) return invalidPlannerRequest(parsed.error.issues)
         const saved = this.plans.saveDraft({
@@ -613,7 +809,7 @@ export class ProductSubagentConsoleService extends Service {
       if (endpoint === EXECUTION_CAPABILITIES_ENDPOINT) {
         const parsed = executionCapabilitiesRequestSchema.safeParse(payload)
         if (!parsed.success) return invalidPlannerRequest(parsed.error.issues)
-        return { ok: true, value: await this.executionCapabilities(parsed.data.parentSessionId) }
+        return { ok: true, value: await this.executionCapabilities(parsed.data.parentSessionId, signal) }
       }
       if (endpoint === PREFLIGHT_PLAN_ENDPOINT || endpoint === APPROVE_PLAN_ENDPOINT) {
         const parsed = endpoint === APPROVE_PLAN_ENDPOINT
@@ -628,7 +824,7 @@ export class ProductSubagentConsoleService extends Service {
         if (plan === undefined) {
           return plannerRpcError('not-found', 'agent plan revision was not found')
         }
-        const capabilities = await this.executionCapabilities(parsed.data.parentSessionId)
+        const capabilities = await this.executionCapabilities(parsed.data.parentSessionId, signal)
         if (endpoint === APPROVE_PLAN_ENDPOINT) {
           const request = approvePlanRequestSchema.parse(parsed.data)
           if (request.capabilityDigest !== capabilities.digest) {
@@ -642,7 +838,7 @@ export class ProductSubagentConsoleService extends Service {
               planId: request.planId,
               revision: request.revision,
               preflight,
-              acceptedWarningCodes: request.acceptedWarningCodes,
+              acceptedWarningIds: request.acceptedWarningIds,
             }),
           }
         }

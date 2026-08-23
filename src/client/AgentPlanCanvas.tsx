@@ -98,6 +98,7 @@ export interface AgentPlanCanvasProps {
   readonly diagnostics: readonly PlanDiagnostic[]
   readonly selected: 'root' | string | null
   readonly onSelect: (selection: 'root' | string) => void
+  readonly editorId?: string
   readonly copy?: AgentPlanCanvasCopy
 }
 
@@ -206,6 +207,7 @@ function createFlowNodes(
   diagnostics: readonly PlanDiagnostic[],
   selected: AgentPlanCanvasProps['selected'],
   copy: AgentPlanCanvasCopy,
+  editorId: string,
 ): readonly PlanNode[] {
   const positions = new Map(layout.map(node => [node.id, node] as const))
   const tasks = new Map(content.tasks.map(task => [task.taskId, task] as const))
@@ -244,8 +246,8 @@ function createFlowNodes(
       ariaLabel: label,
       domAttributes: {
         'data-plan-node-id': node.id,
-        'aria-controls': 'agent-plan-editor',
-        'aria-expanded': selected === selection,
+        'aria-controls': editorId,
+        'aria-pressed': selected === selection,
       } as NonNullable<PlanNode['domAttributes']>,
       width: placed.width,
       height: placed.height,
@@ -289,14 +291,25 @@ function motionDuration(): number {
 
 function AgentPlanCanvasInner({
   planKey, content, diagnostics, selected, onSelect,
+  editorId = 'agent-plan-editor',
   copy = AGENT_PLAN_CANVAS_COPY_ZH,
 }: AgentPlanCanvasProps): ReactNode {
   const topology = useMemo(() => buildPlanCanvasTopology(planKey, content), [content, planKey])
   const edges = useMemo(() => buildPlanCanvasEdges(planKey, content), [content, planKey])
-  const autoLayout = useMemo(() => layoutPlanCanvas(topology, edges), [edges, topology])
+  const topologyIdentity = useMemo(
+    () => `${topology.map(node => node.id).join('\u0000')}\u0001${edges.map(edge => edge.id).join('\u0000')}`,
+    [edges, topology],
+  )
+  const layoutCache = useRef<{ readonly key: string; readonly value: readonly PlanCanvasLayoutNode[] }>()
+  const autoLayout = useMemo(() => {
+    if (layoutCache.current?.key === topologyIdentity) return layoutCache.current.value
+    const value = layoutPlanCanvas(topology, edges)
+    layoutCache.current = { key: topologyIdentity, value }
+    return value
+  }, [edges, topology, topologyIdentity])
   const baselineNodes = useMemo(
-    () => createFlowNodes(topology, autoLayout, content, diagnostics, selected, copy),
-    [autoLayout, content, copy, diagnostics, selected, topology],
+    () => createFlowNodes(topology, autoLayout, content, diagnostics, selected, copy, editorId),
+    [autoLayout, content, copy, diagnostics, editorId, selected, topology],
   )
   const baselineById = useMemo(
     () => new Map(baselineNodes.map(node => [node.id, node] as const)),
@@ -308,10 +321,6 @@ function AgentPlanCanvasInner({
   const instance = useRef<ReactFlowInstance<PlanNode, PlanEdge> | null>(null)
   const offsets = useRef(new Map<string, PlanCanvasOffset>())
   const updateNodeInternals = useUpdateNodeInternals()
-  const topologyIdentity = useMemo(
-    () => `${topology.map(node => node.id).join('\u0000')}\u0001${edges.map(edge => edge.id).join('\u0000')}`,
-    [edges, topology],
-  )
 
   const recordOffset = (id: string, position: { readonly x: number; readonly y: number }): void => {
     const baseline = baselineById.get(id)

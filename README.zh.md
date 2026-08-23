@@ -9,16 +9,16 @@
 无需离开 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 对话，即可设计、运行和检查多 Agent 任务。
 
 > 需要 DSH `0.1.1-rc.2`。这是独立社区插件。
+>
+> Alpha 预览：DSH Web 进程重启后，方案与执行记录会被清除。
 
 ![DSH 产品子代理控制台](docs/assets/subagent-canvas-live.jpg)
 
 ## 功能亮点
 
 - **运行** — 在可拖动的分支画布上查看原生子会话和兼容 Provider 运行。
-- **方案** — 把目标转换为可编辑的角色、任务、依赖、并行批次、Provider、工具与预算。
-- **对照** — 将已批准的计划任务与真实 Workflow 尝试、状态、耗时和子会话逐项对应。
-- 点击任意卡片查看详情，调整或自动适配画布，并可直接打开原生子会话。
-- 完整支持英文和简体中文界面。
+- **方案** — 把目标转换为可编辑的角色、任务、依赖、Provider 与执行限制。
+- **对照** — 将已批准的计划任务与实际执行记录、状态、耗时和子会话逐项对应。
 
 ## 安装
 
@@ -26,7 +26,7 @@
 
 ```sh
 sha256sum --check SHA256SUMS.txt
-dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.1.tgz
+dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
 dsh --profile web --dump-config
 ```
 
@@ -51,7 +51,7 @@ dsh --profile web --dump-config
 1. 打开**子代理 → 方案**，输入目标并生成或手动创建草案。
 2. 在画布和设置中编辑方案，保存修订，然后运行预检。
 3. 处理阻塞问题、确认警告，并批准该修订。
-4. 打开**对照**，请求执行，并查看每项计划任务对应的真实运行。
+4. 打开**对照**，请求当前对话执行方案，并查看每项计划任务对应的实际运行。
 
 完整流程与字段说明见 [Agent 方案设计器](docs/agent-planner.zh.md)。
 
@@ -59,7 +59,8 @@ dsh --profile web --dump-config
 
 - DeepSeek Harness Web Profile `0.1.1-rc.2`
 - Node.js `^22.19.0` 或 `>=24.0.0`
-- 方案或普通委派任务使用外部 coding Agent 时，需要对应的兼容 Provider Bundle
+- 使用“方案”和“对照”时，至少需要一个已配置的兼容子代理 Provider
+- 方案或普通委派任务使用外部 coding Agent 时，需要该 Agent 对应的 Provider Bundle
 
 插件与全部 DSH 包应保持在同一条受支持的版本线上。
 
@@ -68,8 +69,8 @@ dsh --profile web --dump-config
 - [入门指南](docs/getting-started.zh.md)
 - [Agent 方案设计器](docs/agent-planner.zh.md)
 - [故障排查](docs/troubleshooting.zh.md)
-- [更新记录](CHANGELOG.md)
-- [安全说明](SECURITY.md)
+- [更新记录（英文）](CHANGELOG.md)
+- [安全说明（英文）](SECURITY.md)
 
 ## 卸载
 

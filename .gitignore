@@ -9,7 +9,3 @@ release/
 work/
 .env
 .env.*
-
-# Private local task context; never include in the public repository.
-.ai/
-AGENTS.md

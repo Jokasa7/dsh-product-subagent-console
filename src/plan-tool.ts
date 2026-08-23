@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from './index.js'
-import { agentPlanContentSchema } from './plan-types.js'
+import { agentPlanContentSchema, assertBoundedJsonValue } from './plan-types.js'
 
 export const name = 'product-subagent-console-plan-tool'
 export const inject = ['tools', 'productSubagentConsole']
@@ -24,6 +24,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   const toolName = config.toolName ?? 'design_subagent_plan'
   const executeToolName = config.executeToolName ?? 'execute_subagent_plan'
   if (toolName === executeToolName) throw new Error('Agent plan design and execution tool names must be unique')
+  ctx.effect(
+    () => ctx.productSubagentConsole.registerPlannerToolNames(toolName, executeToolName),
+    'dsh-product-subagent-console: planner tool names',
+  )
   ctx.tools.register(defineTool({
     name: toolName,
     description:
@@ -80,6 +84,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(args, exec) {
       const parent = exec.agent
       if (parent === undefined) throw new Error('Agent plan design requires a calling Agent')
+      assertBoundedJsonValue(args.plan)
       const content = agentPlanContentSchema.parse(args.plan)
       const expectedRevision = args.expected_revision ?? 0
       if (args.plan_id === undefined && expectedRevision !== 0) {
@@ -124,6 +129,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         required: true,
         description: 'The exact positive approved revision shown in the Plan canvas.',
       },
+      grant_id: {
+        type: 'string',
+        required: true,
+        description: 'The short-lived one-time execution grant created by the user action in Compare.',
+      },
     },
     output: {
       schema: {
@@ -164,6 +174,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         parent,
         args.plan_id,
         args.revision,
+        args.grant_id,
         exec.signal,
       )
       const completed = execution.bindings.filter(binding => binding.status === 'completed').length

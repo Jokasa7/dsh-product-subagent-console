@@ -6,15 +6,55 @@ const identifierSchema = z.string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
 const boundedNameSchema = z.string().trim().min(1).max(128)
 const boundedTextSchema = z.string().trim().min(1).max(8_000)
-const resourceClaimSchema = z.string().trim().min(1).max(256).refine((value) => {
+
+function canonicalResourceClaim(value: string): string {
+  const segments = value.trim().replaceAll('\\', '/').split('/')
+    .filter(segment => segment.length > 0 && segment !== '.')
+  return segments.length === 0 ? '.' : segments.join('/')
+}
+
+const resourceClaimSchema = z.string().trim().min(1).max(256).superRefine((value, context) => {
   const normalized = value.replaceAll('\\', '/')
-  return !normalized.startsWith('/')
-    && !/^[A-Za-z]:/u.test(normalized)
-    && !normalized.split('/').includes('..')
-}, 'resource claims must be relative identifiers without parent traversal')
+  if (
+    normalized.startsWith('/')
+    || /^[A-Za-z]:/u.test(normalized)
+    || normalized.split('/').includes('..')
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message: 'resource claims must be relative identifiers without parent traversal',
+    })
+  }
+}).transform(canonicalResourceClaim)
 
 export const capabilitySupportSchema = z.enum(['enforced', 'advisory', 'unsupported'])
 export type CapabilitySupport = z.infer<typeof capabilitySupportSchema>
+
+/** Values accepted inside task output schemas and across the planner RPC boundary. */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
+function isBoundedJsonValue(value: unknown): value is JsonValue {
+  try {
+    assertBoundedJsonValue(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Validate without reconstructing objects so JSON Schema property names remain byte-for-byte intact. */
+export const jsonValueSchema = z.unknown()
+  .refine(isBoundedJsonValue, 'expected a bounded JSON value') as z.ZodType<JsonValue>
+
+const jsonObjectSchema = z.unknown().refine(
+  (value): value is { [key: string]: JsonValue } => (
+    typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && isBoundedJsonValue(value)
+  ),
+  'expected a bounded JSON object',
+) as z.ZodType<{ [key: string]: JsonValue }>
 
 export const planPatternSchema = z.enum([
   'single-agent',
@@ -79,7 +119,7 @@ export const planTaskSchema = z.object({
   dependsOn: z.array(planDependencySchema).max(64).default([]),
   expectedOutput: z.object({
     description: z.string().trim().min(1).max(2_000),
-    schema: z.record(z.string(), z.unknown()).optional(),
+    schema: jsonObjectSchema.optional(),
   }).strict(),
   completionCriteria: z.array(z.string().trim().min(1).max(1_000)).min(1).max(16),
   resourceClaims: z.array(resourceClaimSchema).max(32).default([]),
@@ -123,7 +163,7 @@ export const agentPlanRevisionSchema = agentPlanContentSchema.extend({
   createdAt: z.number().finite(),
   updatedAt: z.number().finite(),
   capabilityDigest: z.string().min(1).max(256).optional(),
-  acceptedWarningCodes: z.array(z.string().min(1).max(128)).max(128).optional(),
+  acceptedWarningIds: z.array(z.string().min(1).max(256)).max(512).optional(),
 }).strict()
 export type AgentPlanRevision = z.infer<typeof agentPlanRevisionSchema>
 
@@ -216,10 +256,14 @@ export const executionCapabilitySnapshotSchema = z.object({
   llmRoutes: z.array(z.object({
     provider: boundedNameSchema,
     models: z.array(boundedNameSchema).max(512),
-    catalogStatus: z.enum(['available', 'unavailable']),
+    catalogStatus: z.enum(['available', 'incomplete', 'unavailable']),
   }).strict()).max(128),
   agentPresets: z.array(boundedNameSchema).max(256),
   tools: z.array(boundedNameSchema).max(1_024),
+  plannerTools: z.object({
+    design: z.array(boundedNameSchema).max(32),
+    execute: z.array(boundedNameSchema).max(32),
+  }).strict().optional(),
   budgetSupport: z.object({
     maxAgents: capabilitySupportSchema,
     maxConcurrent: capabilitySupportSchema,
@@ -237,6 +281,7 @@ export const executionCapabilitySnapshotSchema = z.object({
 export type ExecutionCapabilitySnapshot = z.infer<typeof executionCapabilitySnapshotSchema>
 
 export const planDiagnosticSchema = z.object({
+  diagnosticId: z.string().min(1).max(256),
   severity: z.enum(['error', 'warning', 'info']),
   code: z.string().min(1).max(128),
   message: z.string().min(1).max(2_000),
@@ -310,7 +355,7 @@ export type PlanRevisionRequest = z.infer<typeof planRevisionRequestSchema>
 
 export const approvePlanRequestSchema = planRevisionRequestSchema.extend({
   capabilityDigest: z.string().min(1).max(256),
-  acceptedWarningCodes: z.array(z.string().min(1).max(128)).max(128).default([]),
+  acceptedWarningIds: z.array(z.string().min(1).max(256)).max(512).default([]),
 }).strict()
 export type ApprovePlanRequest = z.infer<typeof approvePlanRequestSchema>
 
@@ -343,12 +388,24 @@ export const cancelPlanExecutionResultSchema = z.object({
 }).strict()
 export type CancelPlanExecutionResult = z.infer<typeof cancelPlanExecutionResultSchema>
 
+export const planExecutionGrantSchema = z.object({
+  grantId: z.string().uuid(),
+  parentSessionId: parentSessionIdSchema,
+  planId: z.string().uuid(),
+  revision: z.number().int().positive(),
+  capabilityDigest: z.string().min(1).max(256),
+  executeToolName: boundedNameSchema,
+  expiresAt: z.number().finite(),
+}).strict()
+export type PlanExecutionGrant = z.infer<typeof planExecutionGrantSchema>
+
 export const LIST_PLANS_ENDPOINT = 'planner.list'
 export const WATCH_PLANS_ENDPOINT = 'planner.watch'
 export const SAVE_PLAN_ENDPOINT = 'planner.save'
 export const PREFLIGHT_PLAN_ENDPOINT = 'planner.preflight'
 export const APPROVE_PLAN_ENDPOINT = 'planner.approve'
 export const EXECUTION_CAPABILITIES_ENDPOINT = 'planner.capabilities'
+export const ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT = 'planner.executions.grant'
 export const LIST_PLAN_EXECUTIONS_ENDPOINT = 'planner.executions.list'
 export const WATCH_PLAN_EXECUTIONS_ENDPOINT = 'planner.executions.watch'
 export const CANCEL_PLAN_EXECUTION_ENDPOINT = 'planner.executions.cancel'
@@ -356,11 +413,59 @@ export const CANCEL_PLAN_EXECUTION_ENDPOINT = 'planner.executions.cancel'
 export const MAX_PLAN_BYTES = 256 * 1024
 export const MAX_PLAN_EDGES = 256
 
+/** Reject non-JSON graphs and excessive nesting before recursive schema parsing. */
+export function assertBoundedJsonValue(
+  value: unknown,
+  maxBytes = MAX_PLAN_BYTES,
+  maxDepth = 64,
+  maxNodes = 50_000,
+): void {
+  const stack: {
+    readonly value: unknown
+    readonly depth: number
+    readonly leaving?: boolean
+  }[] = [{ value, depth: 0 }]
+  const active = new WeakSet<object>()
+  let nodes = 0
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (current === undefined) break
+    if (current.leaving === true) {
+      active.delete(current.value as object)
+      continue
+    }
+    nodes += 1
+    if (nodes > maxNodes) throw new Error('agent plan JSON value has too many nodes')
+    if (current.depth > maxDepth) throw new Error('agent plan JSON value is nested too deeply')
+    const item = current.value
+    if (item === null || typeof item === 'string' || typeof item === 'boolean') continue
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item)) throw new Error('agent plan JSON value contains a non-finite number')
+      continue
+    }
+    if (typeof item !== 'object') throw new Error('agent plan contains a non-JSON value')
+    if (active.has(item)) throw new Error('agent plan JSON value must not contain cycles')
+    active.add(item)
+    const prototype = Object.getPrototypeOf(item)
+    if (!Array.isArray(item) && prototype !== Object.prototype && prototype !== null) {
+      throw new Error('agent plan contains a non-plain object')
+    }
+    if (Reflect.ownKeys(item).some(key => typeof key === 'symbol')) {
+      throw new Error('agent plan contains a symbol property')
+    }
+    stack.push({ value: item, depth: current.depth, leaving: true })
+    const children = Array.isArray(item) ? item : Object.values(item)
+    for (const child of children) stack.push({ value: child, depth: current.depth + 1 })
+  }
+  const encoded = JSON.stringify(value)
+  if (encoded === undefined) throw new Error('agent plan is not JSON serializable')
+  if (new TextEncoder().encode(encoded).byteLength > maxBytes) {
+    throw new Error(`agent plan exceeds ${String(maxBytes)} encoded bytes`)
+  }
+}
+
 /** Parse an untrusted revision and enforce its encoded payload bound before deeper processing. */
 export function parseAgentPlanRevision(value: unknown): AgentPlanRevision {
-  const encoded = JSON.stringify(value)
-  if (encoded === undefined || new TextEncoder().encode(encoded).byteLength > MAX_PLAN_BYTES) {
-    throw new Error(`agent plan exceeds ${String(MAX_PLAN_BYTES)} encoded bytes`)
-  }
+  assertBoundedJsonValue(value)
   return agentPlanRevisionSchema.parse(value)
 }

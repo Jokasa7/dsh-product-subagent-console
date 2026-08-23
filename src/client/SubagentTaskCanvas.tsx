@@ -53,6 +53,7 @@ export interface SubagentTaskCanvasProps {
   readonly selectedKey: string | null
   readonly expandedKey: string | null
   readonly copy: SubagentCanvasCopy
+  readonly detailsId?: string
   readonly onSelect: (workbenchKey: string) => void
 }
 
@@ -117,6 +118,7 @@ function flowNodes(
   content: Readonly<Record<string, SubagentCanvasContent>>,
   selectedKey: string | null,
   expandedKey: string | null,
+  detailsId: string,
 ): readonly CanvasNode[] {
   const positions = new Map(layout.map(node => [node.id, node] as const))
   return topology.map((node) => {
@@ -142,7 +144,7 @@ function flowNodes(
       ariaLabel: display.ariaLabel,
       domAttributes: {
         ...(node.kind === 'root' ? {} : {
-          'aria-controls': 'product-subagent-details',
+          'aria-controls': detailsId,
           'aria-expanded': expanded,
         }),
         'data-canvas-node-id': node.id,
@@ -258,6 +260,7 @@ function mergeCanvasNodes(
  */
 function SubagentTaskCanvasInner({
   topology, content, selectedKey, expandedKey, copy, onSelect,
+  detailsId = 'product-subagent-details',
 }: SubagentTaskCanvasProps): ReactNode {
   const topologyIdentity = topologyKey(topology)
   const autoLayout = useMemo(
@@ -267,8 +270,8 @@ function SubagentTaskCanvasInner({
     [topologyIdentity],
   )
   const baselineNodes = useMemo(
-    () => flowNodes(topology, autoLayout, content, selectedKey, expandedKey),
-    [autoLayout, content, expandedKey, selectedKey, topology],
+    () => flowNodes(topology, autoLayout, content, selectedKey, expandedKey, detailsId),
+    [autoLayout, content, detailsId, expandedKey, selectedKey, topology],
   )
   const baselineById = useMemo(
     () => new Map(baselineNodes.map(node => [node.id, node] as const)),

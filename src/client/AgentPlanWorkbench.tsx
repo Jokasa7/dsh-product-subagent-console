@@ -1,5 +1,6 @@
 import {
-  useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode,
+  cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState,
+  type ChangeEvent, type ReactNode,
 } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import {
@@ -7,6 +8,7 @@ import {
   type AgentPlanContent,
   type AgentPlanRevision,
   type ApprovePlanRequest,
+  type ExecutionCapabilitySnapshot,
   type PlanDiagnostic,
   type PlanPreflightResult,
   type PlanRepositorySnapshot,
@@ -39,6 +41,10 @@ export interface AgentPlanWorkbenchInjected {
     request: ApprovePlanRequest,
     signal: AbortSignal,
   ) => Promise<AgentPlanRevision>
+  readonly getExecutionCapabilities: (
+    parentSessionId: SessionId,
+    signal: AbortSignal,
+  ) => Promise<ExecutionCapabilitySnapshot>
   /** Queue a visible user message in the owning conversation; never call an LLM invisibly. */
   readonly requestPlanDesign: (
     parentSessionId: SessionId,
@@ -66,6 +72,7 @@ const WORKBENCH_COPY_ZH_VALUES = {
   planToolUnavailableError: '当前 Agent 预设没有启用方案设计工具。请在 Agent 预设中启用插件的方案工具后，用该预设新建对话。',
   conversationNotReadyError: '当前对话尚未就绪，请刷新页面后重试。',
   genericError: '操作失败。请刷新状态后重试。',
+  noTransportProviderError: '当前 Profile 没有可用的子代理 Provider，无法创建可执行草案。请先安装并配置 Provider。',
   noDiagnostics: '没有发现问题，可以批准此修订。',
   acceptWarning: '我已阅读并接受此警告',
   planName: '方案名称',
@@ -87,10 +94,15 @@ const WORKBENCH_COPY_ZH_VALUES = {
   responsibility: '职责',
   boundaries: '边界',
   onePerLine: '每行一条。',
+  transportProvider: '子代理 Provider',
+  llmProvider: '模型 Provider',
+  model: '模型',
+  agentPreset: 'Agent 预设',
   context: '上下文',
   toolPolicy: '工具策略',
   allowedTools: '允许的工具',
   oneToolPerLine: '每行一个工具名。',
+  unsupportedExecutionField: '当前执行后端不能强制此设置；填写后预检会阻止执行。',
   deleteRole: '删除角色',
   taskName: '任务名称',
   taskBrief: '任务说明',
@@ -124,6 +136,7 @@ const WORKBENCH_COPY_ZH_VALUES = {
   sending: '正在发送…',
   generatePlan: '生成方案',
   createManually: '手动新建',
+  loadingProviders: '正在读取 Provider…',
   currentPlan: '当前方案',
   noSavedPlans: '暂无已保存方案',
   unsavedDraft: '未保存草案',
@@ -185,6 +198,7 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   planToolUnavailableError: 'Plan design is not enabled for this Agent preset. Enable the plugin plan tool in the preset, then start a new conversation with that preset.',
   conversationNotReadyError: 'This conversation is not ready yet. Refresh the page and try again.',
   genericError: 'The action failed. Refresh the current state and try again.',
+  noTransportProviderError: 'This profile has no available subagent Provider. Install and configure a Provider before creating an executable draft.',
   noDiagnostics: 'No issues found. This revision can be approved.',
   acceptWarning: 'I have reviewed and accept this warning',
   planName: 'Plan name',
@@ -206,10 +220,15 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   responsibility: 'Responsibility',
   boundaries: 'Boundaries',
   onePerLine: 'Enter one item per line.',
+  transportProvider: 'Subagent Provider',
+  llmProvider: 'Model Provider',
+  model: 'Model',
+  agentPreset: 'Agent preset',
   context: 'Context',
   toolPolicy: 'Tool policy',
   allowedTools: 'Allowed tools',
   oneToolPerLine: 'Enter one tool name per line.',
+  unsupportedExecutionField: 'The current execution backend cannot enforce this setting; preflight blocks execution when it is set.',
   deleteRole: 'Delete role',
   taskName: 'Task name',
   taskBrief: 'Task brief',
@@ -243,6 +262,7 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   sending: 'Sending…',
   generatePlan: 'Generate plan',
   createManually: 'Create manually',
+  loadingProviders: 'Loading Providers…',
   currentPlan: 'Current plan',
   noSavedPlans: 'No saved plans',
   unsavedDraft: 'Unsaved draft',
@@ -282,6 +302,8 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
 export interface AgentPlanWorkbenchProps {
   readonly sessionId: SessionId
   readonly injected: AgentPlanWorkbenchInjected
+  /** Pause background reads while another workbench mode is visible. */
+  readonly active?: boolean
   readonly copy?: AgentPlanWorkbenchCopy
   readonly canvasCopy?: AgentPlanCanvasCopy
 }
@@ -299,7 +321,7 @@ type LoadState = {
   readonly snapshot?: PlanRepositorySnapshot
 }
 
-type ActionName = 'generate' | 'save' | 'preflight' | 'approve' | 'new-revision' | null
+type ActionName = 'generate' | 'manual' | 'save' | 'preflight' | 'approve' | 'new-revision' | null
 
 function contentFromRevision(revision: AgentPlanRevision): AgentPlanContent {
   return {
@@ -341,7 +363,37 @@ function revisionStateLabel(
   return copy.stateDraft
 }
 
-function createManualPlan(objective: string, copy: AgentPlanWorkbenchCopy): AgentPlanContent {
+function preferredTransport(capabilities: ExecutionCapabilitySnapshot): ExecutionCapabilitySnapshot['transportProviders'][number] | undefined {
+  return capabilities.transportProviders.find(provider => !provider.inheritsParentContext)
+    ?? capabilities.transportProviders[0]
+}
+
+function selectedTransport(
+  capabilities: ExecutionCapabilitySnapshot | undefined,
+  role: PlanRole,
+): ExecutionCapabilitySnapshot['transportProviders'][number] | undefined {
+  return capabilities?.transportProviders.find(provider => provider.name === role.transportProvider)
+}
+
+function canEnforceModelRoute(
+  capabilities: ExecutionCapabilitySnapshot | undefined,
+  role: PlanRole,
+): boolean {
+  return selectedTransport(capabilities, role)?.modelRouting === 'enforced'
+}
+
+function canEnforceRoleComposition(
+  content: AgentPlanContent,
+  capabilities: ExecutionCapabilitySnapshot | undefined,
+): boolean {
+  return content.backendPreference === 'agent-team' && capabilities?.adapters.agentTeam === true
+}
+
+function createManualPlan(
+  objective: string,
+  copy: AgentPlanWorkbenchCopy,
+  transport: ExecutionCapabilitySnapshot['transportProviders'][number],
+): AgentPlanContent {
   return {
     title: objective.trim().slice(0, 160) || copy.manualPlanTitle,
     objective: objective.trim() || copy.manualObjective,
@@ -364,8 +416,8 @@ function createManualPlan(objective: string, copy: AgentPlanWorkbenchCopy): Agen
       name: copy.manualRoleName,
       responsibility: copy.manualRoleResponsibility,
       boundaries: [],
-      transportProvider: 'provider',
-      contextMode: 'fresh',
+      transportProvider: transport.name,
+      contextMode: transport.inheritsParentContext ? 'fork' : 'fresh',
       toolPolicy: { mode: 'inherit' },
     }],
     tasks: [{
@@ -385,6 +437,29 @@ function createManualPlan(objective: string, copy: AgentPlanWorkbenchCopy): Agen
 
 function lines(value: string): string[] {
   return value.split(/\r?\n/u).map(item => item.trim()).filter(Boolean)
+}
+
+function draftLines(value: string): string[] {
+  return value.split(/\r?\n/u)
+}
+
+function normalizedContent(content: AgentPlanContent): AgentPlanContent {
+  return {
+    ...content,
+    successCriteria: lines(content.successCriteria.join('\n')),
+    roles: content.roles.map(role => ({
+      ...role,
+      boundaries: lines(role.boundaries.join('\n')),
+      toolPolicy: role.toolPolicy.mode === 'allowlist'
+        ? { mode: 'allowlist', tools: lines(role.toolPolicy.tools.join('\n')) }
+        : role.toolPolicy,
+    })),
+    tasks: content.tasks.map(task => ({
+      ...task,
+      completionCriteria: lines(task.completionCriteria.join('\n')),
+      resourceClaims: lines(task.resourceClaims.join('\n')),
+    })),
+  }
 }
 
 function uniqueIdentifier(prefix: string, existing: ReadonlySet<string>): string {
@@ -422,7 +497,7 @@ function safeActionMessage(error: unknown, copy: AgentPlanWorkbenchCopy): string
   if (/revision conflict|expected revision|actual revision/iu.test(message)) {
     return copy.conflictError
   }
-  if (/design_subagent_plan.*unavailable/iu.test(message)) {
+  if (/(?:plan design tool|design_subagent_plan).*unavailable/iu.test(message)) {
     return copy.planToolUnavailableError
   }
   if (/current session is unavailable/iu.test(message)) {
@@ -432,11 +507,11 @@ function safeActionMessage(error: unknown, copy: AgentPlanWorkbenchCopy): string
   return copy.genericError
 }
 
-function warningCodes(preflight: PlanPreflightResult | null): readonly string[] {
+function warningIds(preflight: PlanPreflightResult | null): readonly string[] {
   if (preflight === null) return []
   return [...new Set(preflight.diagnostics
     .filter(item => item.severity === 'warning')
-    .map(item => item.code))]
+    .map(item => item.diagnosticId))]
 }
 
 function numberValue(event: ChangeEvent<HTMLInputElement>): number {
@@ -448,7 +523,7 @@ function DiagnosticList({
 }: {
   readonly diagnostics: readonly PlanDiagnostic[]
   readonly accepted: ReadonlySet<string>
-  readonly onAccepted: (code: string, value: boolean) => void
+  readonly onAccepted: (diagnosticId: string, value: boolean) => void
   readonly onSelect: (taskId: string) => void
   readonly copy: AgentPlanWorkbenchCopy
 }): ReactNode {
@@ -457,8 +532,8 @@ function DiagnosticList({
   }
   return (
     <ul className={css.diagnosticList}>
-      {diagnostics.map((diagnostic, index) => (
-        <li key={`${diagnostic.code}:${String(index)}`} data-severity={diagnostic.severity}>
+      {diagnostics.map(diagnostic => (
+        <li key={diagnostic.diagnosticId} data-severity={diagnostic.severity}>
           <div>
             <span className={css.severity}>{diagnostic.severity}</span>
             <code>{diagnostic.code}</code>
@@ -476,8 +551,8 @@ function DiagnosticList({
             <label className={css.acceptWarning}>
               <input
                 type="checkbox"
-                checked={accepted.has(diagnostic.code)}
-                onChange={(event) => { onAccepted(diagnostic.code, event.currentTarget.checked) }}
+                checked={accepted.has(diagnostic.diagnosticId)}
+                onChange={(event) => { onAccepted(diagnostic.diagnosticId, event.currentTarget.checked) }}
               />
               {copy.acceptWarning}
             </label>
@@ -490,26 +565,45 @@ function DiagnosticList({
 
 function Field({ label, hint, children }: {
   readonly label: string
-  readonly hint?: string
+  readonly hint?: string | undefined
   readonly children: ReactNode
 }): ReactNode {
+  const hintId = `${useId()}-hint`
+  const control = isValidElement<{
+    readonly 'aria-label'?: string
+    readonly 'aria-describedby'?: string
+  }>(children)
+    ? cloneElement(children, {
+      'aria-label': children.props['aria-label'] ?? label,
+      ...(hint === undefined
+        ? {}
+        : {
+          'aria-describedby': [children.props['aria-describedby'], hintId]
+            .filter(Boolean)
+            .join(' '),
+        }),
+    })
+    : children
   return (
     <label className={css.field}>
       <span>{label}</span>
-      {children}
-      {hint === undefined ? null : <small>{hint}</small>}
+      {control}
+      {hint === undefined ? null : <small id={hintId}>{hint}</small>}
     </label>
   )
 }
 
 function RootEditor({
-  content, disabled, update, copy,
+  content, disabled, update, copy, capabilities,
 }: {
   readonly content: AgentPlanContent
   readonly disabled: boolean
   readonly update: (next: AgentPlanContent) => void
   readonly copy: AgentPlanWorkbenchCopy
+  readonly capabilities?: ExecutionCapabilitySnapshot
 }): ReactNode {
+  const transportProviders = capabilities?.transportProviders ?? []
+  const defaultTransport = capabilities === undefined ? undefined : preferredTransport(capabilities)
   const updateRole = (roleId: string, recipe: (role: PlanRole) => PlanRole): void => {
     update({
       ...content,
@@ -517,6 +611,9 @@ function RootEditor({
     })
   }
   const addRole = (): void => {
+    const transport = defaultTransport
+      ?? transportProviders.find(provider => provider.name === content.roles[0]?.transportProvider)
+    if (transport === undefined) return
     const roleId = uniqueIdentifier('role', new Set(content.roles.map(role => role.roleId)))
     update({
       ...content,
@@ -525,8 +622,8 @@ function RootEditor({
         name: copy.newRoleName,
         responsibility: copy.newRoleResponsibility,
         boundaries: [],
-        transportProvider: 'provider',
-        contextMode: 'fresh',
+        transportProvider: transport.name,
+        contextMode: transport.inheritsParentContext ? 'fork' : 'fresh',
         toolPolicy: { mode: 'inherit' },
       }],
     })
@@ -565,7 +662,7 @@ function RootEditor({
           disabled={disabled}
           rows={4}
           value={content.successCriteria.join('\n')}
-          onChange={(event) => { update({ ...content, successCriteria: lines(event.currentTarget.value) }) }}
+          onChange={(event) => { update({ ...content, successCriteria: draftLines(event.currentTarget.value) }) }}
         />
       </Field>
       <div className={css.fieldGrid}>
@@ -612,7 +709,7 @@ function RootEditor({
           >
             <option value="auto">auto</option>
             <option value="workflow">workflow</option>
-            <option value="agent-team">agent-team</option>
+            <option value="agent-team" disabled={capabilities?.adapters.agentTeam !== true}>agent-team</option>
           </select>
         </Field>
       </div>
@@ -686,10 +783,22 @@ function RootEditor({
       <section className={css.roles}>
         <header>
           <div><strong>{copy.rolesAndProvider}</strong><span>{content.roles.length}/32</span></div>
-          <button type="button" disabled={disabled || content.roles.length >= 32} onClick={addRole}>{copy.addRole}</button>
+          <button
+            type="button"
+            disabled={disabled || content.roles.length >= 32 || transportProviders.length === 0}
+            onClick={addRole}
+          >{copy.addRole}</button>
         </header>
         {content.roles.map(role => (
-          <details key={role.roleId} className={css.roleCard} open={content.roles.length <= 3}>
+          <details
+            key={role.roleId}
+            className={css.roleCard}
+            ref={(element) => {
+              if (element === null || element.dataset.initialOpen === 'true') return
+              element.open = true
+              element.dataset.initialOpen = 'true'
+            }}
+          >
             <summary><strong>{role.name}</strong><code>{role.roleId}</code></summary>
             <div className={css.roleFields}>
               <Field label={copy.name}>
@@ -717,23 +826,40 @@ function RootEditor({
                   rows={2}
                   value={role.boundaries.join('\n')}
                   onChange={(event) => { updateRole(role.roleId, item => ({
-                    ...item, boundaries: lines(event.currentTarget.value),
+                    ...item, boundaries: draftLines(event.currentTarget.value),
                   })) }}
                 />
               </Field>
               <div className={css.fieldGrid}>
-                <Field label="Transport Provider">
-                  <input
+                <Field label={copy.transportProvider}>
+                  <select
                     disabled={disabled}
                     value={role.transportProvider}
-                    onChange={(event) => { updateRole(role.roleId, item => ({
-                      ...item, transportProvider: event.currentTarget.value,
-                    })) }}
-                  />
+                    onChange={(event) => {
+                      const selected = transportProviders.find(provider => provider.name === event.currentTarget.value)
+                      updateRole(role.roleId, item => ({
+                        ...item,
+                        transportProvider: event.currentTarget.value,
+                        contextMode: selected?.inheritsParentContext === true ? 'fork' : 'fresh',
+                      }))
+                    }}
+                  >
+                    {transportProviders.some(provider => provider.name === role.transportProvider)
+                      ? null
+                      : <option value={role.transportProvider}>{role.transportProvider}</option>}
+                    {transportProviders.map(provider => (
+                      <option key={provider.name} value={provider.name}>
+                        {provider.displayName ?? provider.name}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
-                <Field label="LLM Provider">
+                <Field
+                  label={copy.llmProvider}
+                  hint={canEnforceModelRoute(capabilities, role) ? undefined : copy.unsupportedExecutionField}
+                >
                   <input
-                    disabled={disabled}
+                    disabled={disabled || (!canEnforceModelRoute(capabilities, role) && role.llmProvider === undefined)}
                     value={role.llmProvider ?? ''}
                     onChange={(event) => { updateRole(
                       role.roleId,
@@ -741,9 +867,12 @@ function RootEditor({
                     ) }}
                   />
                 </Field>
-                <Field label="Model">
+                <Field
+                  label={copy.model}
+                  hint={canEnforceModelRoute(capabilities, role) ? undefined : copy.unsupportedExecutionField}
+                >
                   <input
-                    disabled={disabled}
+                    disabled={disabled || (!canEnforceModelRoute(capabilities, role) && role.model === undefined)}
                     value={role.model ?? ''}
                     onChange={(event) => { updateRole(
                       role.roleId,
@@ -751,9 +880,12 @@ function RootEditor({
                     ) }}
                   />
                 </Field>
-                <Field label="Agent Preset">
+                <Field
+                  label={copy.agentPreset}
+                  hint={canEnforceRoleComposition(content, capabilities) ? undefined : copy.unsupportedExecutionField}
+                >
                   <input
-                    disabled={disabled}
+                    disabled={disabled || (!canEnforceRoleComposition(content, capabilities) && role.agentPreset === undefined)}
                     value={role.agentPreset ?? ''}
                     onChange={(event) => { updateRole(
                       role.roleId,
@@ -786,19 +918,27 @@ function RootEditor({
                     })) }}
                   >
                     <option value="inherit">inherit</option>
-                    <option value="allowlist">allowlist</option>
+                    <option
+                      value="allowlist"
+                      disabled={!canEnforceRoleComposition(content, capabilities)}
+                    >allowlist</option>
                   </select>
                 </Field>
               </div>
               {role.toolPolicy.mode !== 'allowlist' ? null : (
-                <Field label={copy.allowedTools} hint={copy.oneToolPerLine}>
+                <Field
+                  label={copy.allowedTools}
+                  hint={canEnforceRoleComposition(content, capabilities)
+                    ? copy.oneToolPerLine
+                    : copy.unsupportedExecutionField}
+                >
                   <textarea
                     disabled={disabled}
                     rows={3}
                     value={role.toolPolicy.tools.join('\n')}
                     onChange={(event) => { updateRole(role.roleId, item => ({
                       ...item,
-                      toolPolicy: { mode: 'allowlist', tools: lines(event.currentTarget.value) },
+                      toolPolicy: { mode: 'allowlist', tools: draftLines(event.currentTarget.value) },
                     })) }}
                   />
                 </Field>
@@ -818,7 +958,7 @@ function RootEditor({
 }
 
 function TaskEditor({
-  content, task, disabled, update, remove, copy,
+  content, task, disabled, update, remove, copy, capabilities,
 }: {
   readonly content: AgentPlanContent
   readonly task: PlanTask
@@ -826,7 +966,9 @@ function TaskEditor({
   readonly update: (task: PlanTask) => void
   readonly remove: () => void
   readonly copy: AgentPlanWorkbenchCopy
+  readonly capabilities?: ExecutionCapabilitySnapshot
 }): ReactNode {
+  const supportsTaskControls = canEnforceRoleComposition(content, capabilities)
   const dependencyById = new Map(task.dependsOn.map(item => [item.taskId, item] as const))
   const setDependency = (taskId: string, enabled: boolean): void => {
     const next = task.dependsOn.filter(item => item.taskId !== taskId)
@@ -891,7 +1033,7 @@ function TaskEditor({
       <label className={css.checkField}>
         <input
           type="checkbox"
-          disabled={disabled}
+          disabled={disabled || (!supportsTaskControls && !task.approvalRequired)}
           checked={task.approvalRequired}
           onChange={(event) => { update({ ...task, approvalRequired: event.currentTarget.checked }) }}
         />
@@ -913,7 +1055,7 @@ function TaskEditor({
           disabled={disabled}
           rows={3}
           value={task.completionCriteria.join('\n')}
-          onChange={(event) => { update({ ...task, completionCriteria: lines(event.currentTarget.value) }) }}
+          onChange={(event) => { update({ ...task, completionCriteria: draftLines(event.currentTarget.value) }) }}
         />
       </Field>
       <Field label={copy.resourceClaims} hint={copy.resourceClaimsHint}>
@@ -921,17 +1063,18 @@ function TaskEditor({
           disabled={disabled}
           rows={3}
           value={task.resourceClaims.join('\n')}
-          onChange={(event) => { update({ ...task, resourceClaims: lines(event.currentTarget.value) }) }}
+          onChange={(event) => { update({ ...task, resourceClaims: draftLines(event.currentTarget.value) }) }}
         />
       </Field>
       <fieldset className={css.group}>
         <legend>{copy.taskBudgetHint}</legend>
+        {supportsTaskControls ? null : <p>{copy.unsupportedExecutionField}</p>}
         <div className={css.fieldGrid}>
           <Field label={copy.maxTokens}>
             <input
               type="number"
               min={1}
-              disabled={disabled}
+              disabled={disabled || (!supportsTaskControls && task.budgetHint?.maxTokens === undefined)}
               value={task.budgetHint?.maxTokens ?? ''}
               onChange={(event) => { setOptionalBudget('maxTokens', event.currentTarget.value) }}
             />
@@ -941,7 +1084,7 @@ function TaskEditor({
               type="number"
               min={0}
               step="0.01"
-              disabled={disabled}
+              disabled={disabled || (!supportsTaskControls && task.budgetHint?.maxCostUsd === undefined)}
               value={task.budgetHint?.maxCostUsd ?? ''}
               onChange={(event) => { setOptionalBudget('maxCostUsd', event.currentTarget.value) }}
             />
@@ -997,8 +1140,12 @@ function TaskEditor({
  * deterministic preflight, explicit warning acceptance, and approval.
  */
 export function AgentPlanWorkbench({
-  sessionId, injected, canvasCopy, copy = AGENT_PLAN_WORKBENCH_COPY_ZH,
+  sessionId, injected, active = true, canvasCopy, copy = AGENT_PLAN_WORKBENCH_COPY_ZH,
 }: AgentPlanWorkbenchProps): ReactNode {
+  const instanceId = useId()
+  const generatorTitleId = `${instanceId}-generator-title`
+  const editorId = `${instanceId}-editor`
+  const reviewTitleId = `${instanceId}-review-title`
   const [loadRequest, setLoadRequest] = useState(0)
   const [load, setLoad] = useState<LoadState>({ status: 'loading' })
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
@@ -1007,12 +1154,14 @@ export function AgentPlanWorkbench({
   const [objective, setObjective] = useState('')
   const [preflight, setPreflight] = useState<PlanPreflightResult | null>(null)
   const [acceptedWarnings, setAcceptedWarnings] = useState<ReadonlySet<string>>(new Set())
+  const [capabilities, setCapabilities] = useState<ExecutionCapabilitySnapshot | undefined>()
   const [action, setAction] = useState<ActionName>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const actionController = useRef<AbortController | null>(null)
 
   useEffect(() => {
+    if (!active) return
     const controller = new AbortController()
     const run = async (): Promise<void> => {
       try {
@@ -1041,9 +1190,18 @@ export function AgentPlanWorkbench({
     }
     void run()
     return () => { controller.abort() }
-  }, [injected, loadRequest, sessionId])
+  }, [active, injected, loadRequest, sessionId])
 
   useEffect(() => () => { actionController.current?.abort() }, [])
+
+  useEffect(() => {
+    if (!active) return
+    const controller = new AbortController()
+    void injected.getExecutionCapabilities(sessionId, controller.signal)
+      .then(snapshot => { if (!controller.signal.aborted) setCapabilities(snapshot) })
+      .catch(() => {})
+    return () => { controller.abort() }
+  }, [active, injected, sessionId])
 
   const plans = useMemo(() => latestPlans(load.snapshot?.plans ?? []), [load.snapshot?.plans])
   const selectedStoredPlan = plans.find(plan => plan.planId === selectedPlanId)
@@ -1065,8 +1223,8 @@ export function AgentPlanWorkbench({
   const selectedTask = selection === 'root'
     ? undefined
     : editor?.content.tasks.find(task => task.taskId === selection)
-  const warnings = warningCodes(preflight)
-  const warningsAccepted = warnings.every(code => acceptedWarnings.has(code))
+  const warnings = warningIds(preflight)
+  const warningsAccepted = warnings.every(diagnosticId => acceptedWarnings.has(diagnosticId))
   const canApprove = editor?.planId !== undefined
     && editor.state === 'draft'
     && !editor.dirty
@@ -1124,7 +1282,7 @@ export function AgentPlanWorkbench({
 
   const save = async (): Promise<void> => {
     if (editor === null) return
-    const parsed = agentPlanContentSchema.safeParse(editor.content)
+    const parsed = agentPlanContentSchema.safeParse(normalizedContent(editor.content))
     if (!parsed.success) {
       setActionError(copy.invalidPlan)
       return
@@ -1179,7 +1337,7 @@ export function AgentPlanWorkbench({
         planId: editor.planId,
         revision: editor.revision,
         capabilityDigest: preflight.capabilityDigest,
-        acceptedWarningCodes: [...acceptedWarnings],
+        acceptedWarningIds: [...acceptedWarnings],
       }, signal)
       setEditor(editorFromRevision(approved))
       setMessage(formatCopy(copy.approvedRevision, { revision: approved.revision }))
@@ -1248,14 +1406,33 @@ export function AgentPlanWorkbench({
     setSelection('root')
   }
 
-  const startManual = (): void => {
-    setSelectedPlanId(null)
-    setEditor({ revision: 0, state: 'draft', content: createManualPlan(objective, copy), dirty: true })
-    setSelection('root')
-    setPreflight(null)
-    setAcceptedWarnings(new Set())
-    setActionError(null)
-    setMessage(null)
+  const startManual = async (): Promise<void> => {
+    const signal = beginAction('manual')
+    try {
+      const snapshot = capabilities ?? await injected.getExecutionCapabilities(sessionId, signal)
+      setCapabilities(snapshot)
+      const transport = preferredTransport(snapshot)
+      if (transport === undefined) {
+        setActionError(copy.noTransportProviderError)
+        return
+      }
+      setSelectedPlanId(null)
+      setEditor({
+        revision: 0,
+        state: 'draft',
+        content: createManualPlan(objective, copy, transport),
+        dirty: true,
+      })
+      setSelection('root')
+      setPreflight(null)
+      setAcceptedWarnings(new Set())
+      setMessage(null)
+    } catch (error: unknown) {
+      const safe = safeActionMessage(error, copy)
+      if (safe.length > 0) setActionError(safe)
+    } finally {
+      finishAction()
+    }
   }
 
   const discardChanges = (): void => {
@@ -1271,12 +1448,13 @@ export function AgentPlanWorkbench({
 
   return (
     <section className={css.root} aria-busy={load.status === 'loading' || action !== null}>
-      <section className={css.generator} aria-labelledby="agent-plan-generator-title">
+      <section className={css.generator} aria-labelledby={generatorTitleId}>
         <div>
-          <h3 id="agent-plan-generator-title">{copy.generatorTitle}</h3>
+          <h3 id={generatorTitleId}>{copy.generatorTitle}</h3>
           <p>{copy.generatorDescription}</p>
         </div>
         <textarea
+          aria-label={copy.objective}
           rows={2}
           placeholder={copy.generatorPlaceholder}
           value={objective}
@@ -1286,8 +1464,12 @@ export function AgentPlanWorkbench({
           <button type="button" disabled={action !== null} onClick={() => { void requestDesign() }}>
             {action === 'generate' ? copy.sending : copy.generatePlan}
           </button>
-          <button type="button" disabled={action !== null || editor?.dirty === true} onClick={startManual}>
-            {copy.createManually}
+          <button
+            type="button"
+            disabled={action !== null || editor?.dirty === true}
+            onClick={() => { void startManual() }}
+          >
+            {action === 'manual' ? copy.loadingProviders : copy.createManually}
           </button>
         </div>
       </section>
@@ -1355,10 +1537,11 @@ export function AgentPlanWorkbench({
               diagnostics={preflight?.diagnostics ?? []}
               selected={selection}
               onSelect={setSelection}
+              editorId={editorId}
               {...(canvasCopy === undefined ? {} : { copy: canvasCopy })}
             />
           </div>
-          <aside id="agent-plan-editor" className={css.inspector} aria-label={copy.editorAria}>
+          <aside id={editorId} className={css.inspector} aria-label={copy.editorAria}>
             <header className={css.inspectorHeader}>
               <div>
                 <span>{selection === 'root' ? copy.planSettings : copy.taskSettings}</span>
@@ -1367,7 +1550,13 @@ export function AgentPlanWorkbench({
               {editor.state === 'approved' ? <span className={css.locked}>{copy.approvedReadOnly}</span> : null}
             </header>
             {selection === 'root' || selectedTask === undefined
-              ? <RootEditor content={editor.content} disabled={!editable} update={updateContent} copy={copy} />
+              ? <RootEditor
+                content={editor.content}
+                disabled={!editable}
+                update={updateContent}
+                copy={copy}
+                {...(capabilities === undefined ? {} : { capabilities })}
+              />
               : <TaskEditor
                 content={editor.content}
                 task={selectedTask}
@@ -1378,16 +1567,17 @@ export function AgentPlanWorkbench({
                 }) }}
                 remove={() => { removeTask(selectedTask.taskId) }}
                 copy={copy}
+                {...(capabilities === undefined ? {} : { capabilities })}
               />}
           </aside>
         </div>
       )}
 
       {editor === null ? null : (
-        <section className={css.review} aria-labelledby="agent-plan-review-title">
+        <section className={css.review} aria-labelledby={reviewTitleId}>
           <header>
             <div>
-              <h3 id="agent-plan-review-title">{copy.reviewTitle}</h3>
+              <h3 id={reviewTitleId}>{copy.reviewTitle}</h3>
               <p>{copy.reviewDescription}</p>
             </div>
             <div className={css.reviewActions}>

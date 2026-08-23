@@ -4,7 +4,7 @@ import type {
 import { describe, expect, it } from 'vitest'
 import type { ConsoleSnapshot } from '../src/types.js'
 import {
-  buildWorkbenchTree, collectTreeParentIds, flattenWorkbenchTree,
+  buildWorkbenchTree, collectTreeParentIds, collectTreeParentScope, flattenWorkbenchTree,
 } from '../src/client/workbench-model.js'
 
 const root = 'root' as SessionId
@@ -107,6 +107,68 @@ describe('workbench model', () => {
       ...summaries,
       ['unrelated' as SessionId]: summary('unrelated' as SessionId),
     } as Readonly<Record<SessionId, SessionSummary>>, catalogs)).not.toContain('unrelated')
+  })
+
+  it('reports and consistently applies the 64-Session RPC boundary', () => {
+    const entries = Array.from({ length: 70 }, (_, index) => ({
+      kind: 'child' as const,
+      id: `child-${String(index).padStart(2, '0')}` as SessionId,
+      activity: 'inactive' as const,
+      hasChildren: false,
+      mode: 'one-shot' as const,
+      label: `Child ${String(index)}`,
+    }))
+    const largeCatalog = {
+      [root]: { state: 'ready', error: null, parentAvailable: true, entries },
+    } as unknown as SessionListState['subagentsByParent']
+    const scope = collectTreeParentScope(root, { [root]: summary(root) }, largeCatalog)
+
+    expect(scope.ids).toHaveLength(64)
+    expect(scope.truncated).toBe(true)
+    const tree = buildWorkbenchTree({
+      rootSessionId: root,
+      catalogs: largeCatalog,
+      summaries: { [root]: summary(root) },
+      includedSessionIds: new Set(scope.ids),
+    })
+    expect(tree).toHaveLength(63)
+  })
+
+  it('keeps a running Agent visible when the bounded scope omits older children', () => {
+    const entries = [
+      ...Array.from({ length: 64 }, (_, index) => ({
+        kind: 'child' as const,
+        id: `a-inactive-${String(index).padStart(2, '0')}` as SessionId,
+        activity: 'inactive' as const,
+        hasChildren: false,
+        mode: 'one-shot' as const,
+      })),
+      {
+        kind: 'child' as const,
+        id: 'z-active' as SessionId,
+        activity: 'running' as const,
+        hasChildren: false,
+        mode: 'continuable' as const,
+      },
+    ]
+    const largeCatalog = {
+      [root]: { state: 'ready', error: null, parentAvailable: true, entries },
+    } as unknown as SessionListState['subagentsByParent']
+    const scope = collectTreeParentScope(root, { [root]: summary(root) }, largeCatalog)
+    const tree = buildWorkbenchTree({
+      rootSessionId: root,
+      catalogs: largeCatalog,
+      summaries: { [root]: summary(root) },
+      includedSessionIds: new Set(scope.ids),
+    })
+
+    expect(scope.truncated).toBe(true)
+    expect(scope.ids).toContain('z-active')
+    expect(tree).toContainEqual(expect.objectContaining({
+      kind: 'native',
+      childSessionId: 'z-active',
+      state: 'active',
+    }))
   })
 
   it('deduplicates native lifecycle rows and preserves factual nesting', () => {
