@@ -69,7 +69,7 @@ jobs:
           pnpm run pack:check
           pnpm publint
 
-      - name: Pack prebuilt Bundle and checksums
+      - name: Pack prebuilt Bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -80,6 +80,22 @@ jobs:
             echo "Expected one tarball, found ${count}." >&2
             exit 1
           fi
+
+      - name: Install Chromium headless shell
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
+      - name: Smoke the exact release package in a clean DSH Web profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(find release -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "${package}"
+          pnpm run smoke:web -- --package "${package}"
+
+      - name: Create and verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
           (cd release && sha256sum ./*.tgz > SHA256SUMS.txt)
           (cd release && sha256sum --check SHA256SUMS.txt)
 
@@ -118,8 +134,9 @@ jobs:
           ## Highlights
 
           - Adds Runtime, Plan, and Compare modes to the Subagents tab.
-          - Creates editable Agent roles, tasks, dependencies, Providers, tools, and budgets from a goal.
-          - Preflights and locks approved plan revisions before Workflow execution.
+          - Validates live Provider capabilities, output schemas, dependencies, write scopes, and execution limits before approval.
+          - Keeps queued execution requests stable and rejects duplicate active starts for the same approved revision.
+          - Keeps active Agents visible in large trees while pausing hidden background activity.
           - Matches planned tasks with actual child attempts, status, and timing.
 
           ## Compatibility

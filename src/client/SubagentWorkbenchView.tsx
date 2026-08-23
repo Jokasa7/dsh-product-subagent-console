@@ -1,5 +1,5 @@
 import {
-  useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode,
+  useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode,
 } from 'react'
 import type { SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
 import {
@@ -11,6 +11,7 @@ import type {
   CancelPlanExecutionRequest,
   CancelPlanExecutionResult,
   ExecutionCapabilitySnapshot,
+  PlanExecutionGrant,
   PlanExecutionRepositorySnapshot,
   PlanRepositorySnapshot,
   PlanRevisionRequest,
@@ -38,7 +39,7 @@ import {
 } from './SubagentTaskCanvas.js'
 import { buildWorkbenchCanvasTopology, workbenchCanvasRootId } from './workbench-canvas.js'
 import {
-  buildWorkbenchTree, collectTreeParentIds, flattenWorkbenchTree,
+  buildWorkbenchTree, collectTreeParentScope, flattenWorkbenchTree,
   type NativeWorkbenchNode, type ProductAttemptWorkbenchNode, type ProductWorkbenchNode,
   type WorkbenchNode, type WorkbenchState,
 } from './workbench-model.js'
@@ -84,7 +85,7 @@ export interface PlanExecutionWorkbenchInjected extends AgentPlanWorkbenchInject
     parentSessionId: SessionId,
     request: PlanRevisionRequest,
     signal: AbortSignal,
-  ) => Promise<void>
+  ) => Promise<PlanExecutionGrant>
 }
 
 export type ProductSubagentWorkbenchInjected = SubagentWorkbenchInjected
@@ -314,14 +315,15 @@ function NativeDetails({ node, now, t }: {
 
 /** Render factual native and observed delegation state for the runtime mode. */
 function RuntimeWorkbenchView({
-  sessionId, useSessions, listSessions, watchSessions, openChild, refreshNative, t,
-}: RuntimeWorkbenchProps): ReactNode {
+  sessionId, useSessions, listSessions, watchSessions, openChild, refreshNative, t, active, detailsId,
+}: RuntimeWorkbenchProps & { readonly active: boolean; readonly detailsId: string }): ReactNode {
   const catalogs = useSessions(snapshot => snapshot.subagentsByParent)
   const summaries = useSessions(snapshot => snapshot.byId)
-  const parentIds = useMemo(
-    () => collectTreeParentIds(sessionId, summaries, catalogs),
+  const parentScope = useMemo(
+    () => collectTreeParentScope(sessionId, summaries, catalogs),
     [catalogs, sessionId, summaries],
   )
+  const parentIds = parentScope.ids
   const parentIdsKey = useMemo(() => parentIds.map(String).join('\u0000'), [parentIds])
   const [request, setRequest] = useState(0)
   const [state, setState] = useState<SnapshotState>({ status: 'loading' })
@@ -329,10 +331,19 @@ function RuntimeWorkbenchView({
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const refreshed = useRef(new Set<SessionId>())
+  const nativeRefreshInFlight = useRef(new Map<SessionId, Promise<void>>())
   const refreshCursor = useRef(0)
   const root = useRef<HTMLElement | null>(null)
+  const requestNativeRefresh = useCallback((parentId: SessionId): void => {
+    if (nativeRefreshInFlight.current.has(parentId)) return
+    const pending = refreshNative(parentId)
+      .catch(() => { refreshed.current.delete(parentId) })
+      .finally(() => { nativeRefreshInFlight.current.delete(parentId) })
+    nativeRefreshInFlight.current.set(parentId, pending)
+  }, [refreshNative])
 
   useEffect(() => {
+    if (!active) return
     const current = new Set(parentIds)
     for (const parentId of refreshed.current) {
       if (!current.has(parentId)) refreshed.current.delete(parentId)
@@ -340,11 +351,12 @@ function RuntimeWorkbenchView({
     for (const parentId of parentIds) {
       if (refreshed.current.has(parentId)) continue
       refreshed.current.add(parentId)
-      void refreshNative(parentId)
+      requestNativeRefresh(parentId)
     }
-  }, [parentIds, refreshNative])
+  }, [active, parentIds, requestNativeRefresh])
 
   useEffect(() => {
+    if (!active) return
     const controller = new AbortController()
     const load = async (): Promise<void> => {
       try {
@@ -371,27 +383,31 @@ function RuntimeWorkbenchView({
     return () => { controller.abort() }
   // parentIdsKey is the stable value dependency; parentIds is captured from the same render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listSessions, parentIdsKey, request, watchSessions])
+  }, [active, listSessions, parentIdsKey, request, watchSessions])
 
   useEffect(() => {
+    if (!active) return
     if (parentIds.length === 0) return
     const refreshOne = (): void => {
       const parentId = parentIds[refreshCursor.current % parentIds.length]
       refreshCursor.current += 1
-      if (parentId !== undefined) void refreshNative(parentId)
+      if (parentId !== undefined) requestNativeRefresh(parentId)
     }
     const timer = setInterval(refreshOne, 3_000)
     return () => { clearInterval(timer) }
   // parentIdsKey is the stable value dependency; parentIds is captured from the same render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parentIdsKey, refreshNative])
+  }, [active, parentIdsKey, requestNativeRefresh])
 
   const tree = useMemo(() => buildWorkbenchTree({
     rootSessionId: sessionId,
     catalogs,
     summaries,
     ...(state.snapshot === undefined ? {} : { snapshot: state.snapshot }),
-  }), [catalogs, sessionId, state.snapshot, summaries])
+    includedSessionIds: new Set(parentIds),
+  // parentIdsKey captures the same bounded identity without depending on the fresh array.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [catalogs, parentIdsKey, sessionId, state.snapshot, summaries])
   const flat = useMemo(() => flattenWorkbenchTree(tree), [tree])
   const disconnected = state.status === 'error'
   const liveCount = flat.filter(node => isLiveNode(node) && !isDisconnectedPluginNode(node, disconnected)).length
@@ -461,10 +477,11 @@ function RuntimeWorkbenchView({
   }), [t])
 
   useEffect(() => {
+    if (!active) return
     if (liveCount === 0) return
     const timer = setInterval(() => { setNow(Date.now()) }, 1_000)
     return () => { clearInterval(timer) }
-  }, [liveCount])
+  }, [active, liveCount])
 
   useEffect(() => {
     if (selectedKey === null || selected !== undefined) return
@@ -473,7 +490,7 @@ function RuntimeWorkbenchView({
   }, [selected, selectedKey])
 
   const refresh = (): void => {
-    for (const parentId of parentIds) void refreshNative(parentId)
+    for (const parentId of parentIds) requestNativeRefresh(parentId)
     setState(previous => ({
       status: 'loading',
       ...(previous.snapshot === undefined ? {} : { snapshot: previous.snapshot }),
@@ -518,6 +535,11 @@ function RuntimeWorkbenchView({
           <span>{t('load.truncated', { count: state.snapshot?.diagnostics.droppedActiveRuns ?? 0 })}</span>
         </div>
       ) : null}
+      {parentScope.truncated ? (
+        <div className={css.failure} role="status">
+          <span>{t('load.parentTruncated', { count: parentIds.length })}</span>
+        </div>
+      ) : null}
       <div className={selected === undefined || !detailsOpen ? css.layout : `${css.layout} ${css.layoutWithDetails}`}>
         <div className={css.canvasShell}>
           <SubagentTaskCanvas
@@ -530,6 +552,7 @@ function RuntimeWorkbenchView({
               setSelectedKey(key)
               setDetailsOpen(true)
             }}
+            detailsId={detailsId}
           />
           {state.status === 'loading' && flat.length === 0 ? (
             <p className={css.canvasEmpty}>{t('loading')}</p>
@@ -543,7 +566,7 @@ function RuntimeWorkbenchView({
           ) : null}
         </div>
         {selected === undefined || !detailsOpen ? null : (
-          <aside id="product-subagent-details" className={css.details} aria-label={t('details.title')}>
+          <aside id={detailsId} className={css.details} aria-label={t('details.title')}>
             <header>
               <div>
                 <span>{selected.kind === 'product'
@@ -592,12 +615,13 @@ function RuntimeWorkbenchView({
 }
 
 function ComparisonWorkbenchMode({
-  sessionId, injected, t, english,
+  sessionId, injected, t, english, active,
 }: {
   readonly sessionId: SessionId
   readonly injected: PlanExecutionWorkbenchInjected
   readonly t: SubagentWorkbenchProps['t']
   readonly english: boolean
+  readonly active: boolean
 }): ReactNode {
   const [reload, setReload] = useState(0)
   const [state, setState] = useState<ComparisonSnapshotState>({
@@ -606,6 +630,7 @@ function ComparisonWorkbenchMode({
   })
 
   useEffect(() => {
+    if (!active) return
     const controller = new AbortController()
     const loadPlans = async (): Promise<void> => {
       try {
@@ -646,7 +671,7 @@ function ComparisonWorkbenchMode({
     void loadPlans()
     void loadExecutions()
     return () => { controller.abort() }
-  }, [injected, reload, sessionId])
+  }, [active, injected, reload, sessionId])
 
   const actions = useMemo(() => ({
     requestExecution: (request: PlanRevisionRequest, signal: AbortSignal) => (
@@ -682,6 +707,7 @@ function ComparisonWorkbenchMode({
         </div>
       ) : null}
       <AgentPlanComparison
+        active={active}
         sessionId={sessionId}
         plans={state.plans?.plans ?? []}
         executionSnapshot={state.executions}
@@ -698,13 +724,23 @@ type WorkbenchMode = 'runtime' | 'planner' | 'compare'
 /** Render the conversation-level workbench with runtime, plan, and comparison modes. */
 export function SubagentWorkbenchView(props: SubagentWorkbenchProps): ReactNode {
   const { sessionId, t } = props
+  const instanceId = useId()
+  const runtimeDetailsId = `${instanceId}-runtime-details`
   const english = t('locale.code') === 'en'
   const [mode, setMode] = useState<WorkbenchMode>('runtime')
+  const [mountedModes, setMountedModes] = useState<ReadonlySet<WorkbenchMode>>(
+    () => new Set<WorkbenchMode>(['runtime']),
+  )
   const tabs: readonly { readonly id: WorkbenchMode; readonly label: string }[] = [
     { id: 'runtime', label: t('workbench.mode.runtime') },
     { id: 'planner', label: t('workbench.mode.planner') },
     { id: 'compare', label: t('workbench.mode.compare') },
   ]
+
+  const activateMode = (next: WorkbenchMode): void => {
+    setMode(next)
+    setMountedModes(previous => previous.has(next) ? previous : new Set([...previous, next]))
+  }
 
   const selectAdjacent = (
     event: KeyboardEvent<HTMLButtonElement>,
@@ -719,7 +755,7 @@ export function SubagentWorkbenchView(props: SubagentWorkbenchProps): ReactNode 
         : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
     const next = tabs[nextIndex]
     if (next === undefined) return
-    setMode(next.id)
+    activateMode(next.id)
     const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
     buttons?.[nextIndex]?.focus()
   }
@@ -730,36 +766,54 @@ export function SubagentWorkbenchView(props: SubagentWorkbenchProps): ReactNode 
         {tabs.map((tab, index) => (
           <button
             key={tab.id}
-            id={`product-subagent-mode-${tab.id}`}
+            id={`${instanceId}-mode-${tab.id}`}
             type="button"
             role="tab"
             aria-selected={mode === tab.id}
-            aria-controls={`product-subagent-panel-${tab.id}`}
+            aria-controls={`${instanceId}-panel-${tab.id}`}
             tabIndex={mode === tab.id ? 0 : -1}
-            onClick={() => { setMode(tab.id) }}
+            onClick={() => { activateMode(tab.id) }}
             onKeyDown={(event) => { selectAdjacent(event, index) }}
           >{tab.label}</button>
         ))}
       </nav>
-      <div
-        id={`product-subagent-panel-${mode}`}
-        className={css.modeBody}
-        role="tabpanel"
-        aria-labelledby={`product-subagent-mode-${mode}`}
-      >
-        {mode === 'runtime' ? (
-          <RuntimeWorkbenchView {...props} />
-        ) : mode === 'planner' ? (
-          <AgentPlanWorkbench
-            sessionId={sessionId}
-            injected={props}
-            copy={english ? AGENT_PLAN_WORKBENCH_COPY_EN : AGENT_PLAN_WORKBENCH_COPY_ZH}
-            canvasCopy={english ? AGENT_PLAN_CANVAS_COPY_EN : AGENT_PLAN_CANVAS_COPY_ZH}
-          />
-        ) : (
-          <ComparisonWorkbenchMode sessionId={sessionId} injected={props} t={t} english={english} />
-        )}
-      </div>
+      {tabs.map(tab => (
+        <div
+          key={tab.id}
+          id={`${instanceId}-panel-${tab.id}`}
+          className={css.modeBody}
+          role="tabpanel"
+          aria-labelledby={`${instanceId}-mode-${tab.id}`}
+          hidden={mode !== tab.id}
+        >
+          {!mountedModes.has(tab.id) ? null : tab.id === 'runtime' ? (
+            <RuntimeWorkbenchView
+              key={`runtime:${String(sessionId)}`}
+              {...props}
+              active={mode === 'runtime'}
+              detailsId={runtimeDetailsId}
+            />
+          ) : tab.id === 'planner' ? (
+            <AgentPlanWorkbench
+              key={`planner:${String(sessionId)}`}
+              sessionId={sessionId}
+              injected={props}
+              active={mode === 'planner'}
+              copy={english ? AGENT_PLAN_WORKBENCH_COPY_EN : AGENT_PLAN_WORKBENCH_COPY_ZH}
+              canvasCopy={english ? AGENT_PLAN_CANVAS_COPY_EN : AGENT_PLAN_CANVAS_COPY_ZH}
+            />
+          ) : (
+            <ComparisonWorkbenchMode
+              key={`compare:${String(sessionId)}`}
+              sessionId={sessionId}
+              injected={props}
+              t={t}
+              english={english}
+              active={mode === 'compare'}
+            />
+          )}
+        </div>
+      ))}
     </section>
   )
 }

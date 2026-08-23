@@ -19,6 +19,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 const PLAN_ID = '49ad5827-cf2c-4a38-a997-47b6f25b07d1'
 const HOST_ID = '81d7cb39-bcca-4a51-899d-622da8593645'
 const EXECUTION_ID = 'dd4c11d4-4949-4d27-b58c-af35afce42c2'
+const GRANT_ID = '8c912da8-78e8-4aa8-90d1-e66aee8ac231'
 const PLAN_CONTENT: AgentPlanContent = {
   title: 'Review release',
   objective: 'Review the release in parallel.',
@@ -101,6 +102,10 @@ const CAPABILITIES = {
   llmRoutes: [],
   agentPresets: [],
   tools: ['design_subagent_plan', 'execute_subagent_plan'],
+  plannerTools: {
+    design: ['design_subagent_plan'],
+    execute: ['execute_subagent_plan'],
+  },
   budgetSupport: {
     maxAgents: 'enforced',
     maxConcurrent: 'enforced',
@@ -156,7 +161,10 @@ const EXECUTION_SNAPSHOT = {
   }],
 } as const
 
-function bench() {
+function bench(options: {
+  readonly capabilities?: unknown
+  readonly executeToolName?: string
+} = {}) {
   const prompt = vi.fn().mockResolvedValue({ ok: true, value: { accepted: true } })
   const call = vi.fn(async (
     _channel: string,
@@ -169,11 +177,23 @@ function bench() {
       case 'planner.watch': return { ok: true, value: PLAN_SNAPSHOT }
       case 'planner.save':
       case 'planner.approve': return { ok: true, value: PLAN_REVISION }
-      case 'planner.capabilities': return { ok: true, value: CAPABILITIES }
+      case 'planner.capabilities': return { ok: true, value: options.capabilities ?? CAPABILITIES }
       case 'planner.preflight': return { ok: true, value: PREFLIGHT }
       case 'planner.executions.list':
       case 'planner.executions.watch': return { ok: true, value: EXECUTION_SNAPSHOT }
       case 'planner.executions.cancel': return { ok: true, value: { status: 'requested' } }
+      case 'planner.executions.grant': return {
+        ok: true,
+        value: {
+          grantId: GRANT_ID,
+          parentSessionId: 'parent',
+          planId: PLAN_ID,
+          revision: 1,
+          capabilityDigest: 'enforced-digest',
+          executeToolName: options.executeToolName ?? 'execute_subagent_plan',
+          expiresAt: Date.now() + 60_000,
+        },
+      }
       default: throw new Error(`unexpected endpoint: ${endpoint}`)
     }
   })
@@ -237,7 +257,7 @@ describe('browser planner RPC injection', () => {
       planId: PLAN_ID,
       revision: 1,
       capabilityDigest: 'enforced-digest',
-      acceptedWarningCodes: [],
+      acceptedWarningIds: [],
     }, signal)).resolves.toEqual(PLAN_REVISION)
     await expect(injected.listPlanExecutions(['parent' as SessionId], signal))
       .resolves.toEqual(EXECUTION_SNAPSHOT)
@@ -306,6 +326,32 @@ describe('browser planner RPC injection', () => {
     expect(text).toContain(`plan_id=${PLAN_ID}`)
     expect(text).toContain('revision=1')
     expect(text).toContain('不要改用其他修订')
+  })
+
+  it('uses configured planner tool names in both visible prompts', async () => {
+    const customCapabilities = {
+      ...CAPABILITIES,
+      tools: ['compose_agent_work', 'run_agent_work'],
+      plannerTools: {
+        design: ['compose_agent_work'],
+        execute: ['run_agent_work'],
+      },
+    }
+    const { injected, prompt } = bench({
+      capabilities: customCapabilities,
+      executeToolName: 'run_agent_work',
+    })
+    const signal = new AbortController().signal
+
+    await injected.requestPlanDesign('parent' as SessionId, '检查发布质量', signal)
+    expect(prompt.mock.calls[0]?.[0]?.[0]?.text).toContain('compose_agent_work')
+    prompt.mockClear()
+    await injected.requestPlanExecution('parent' as SessionId, {
+      parentSessionId: 'parent',
+      planId: PLAN_ID,
+      revision: 1,
+    }, signal)
+    expect(prompt.mock.calls[0]?.[0]?.[0]?.text).toContain('run_agent_work')
   })
 
   it('rejects cross-session visible planner requests', async () => {

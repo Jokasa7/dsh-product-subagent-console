@@ -93,7 +93,7 @@ function plan(): AgentPlanRevision {
     createdAt: 1_000,
     updatedAt: 2_000,
     capabilityDigest: 'capability-v1',
-    acceptedWarningCodes: [],
+    acceptedWarningIds: [],
     title: 'Repository review',
     objective: 'Review two independent areas and synthesize one verdict.',
     successCriteria: ['The verdict cites both reviews.'],
@@ -552,6 +552,19 @@ describe('Workflow plan execution adapter', () => {
     const budget = plan()
     budget.tasks[0] = { ...budget.tasks[0]!, budgetHint: { maxTokens: 2_000 } }
     expect(() => adapter().instance.start({ ...base, plan: budget })).toThrow(/cannot enforce the task budget hint/)
+
+    const schemaAdapter = adapter()
+    const invalidSchema = plan()
+    invalidSchema.tasks[0] = {
+      ...invalidSchema.tasks[0]!,
+      expectedOutput: {
+        description: 'Structured findings.',
+        schema: { type: 'definitely-not-supported' },
+      },
+    }
+    expect(() => schemaAdapter.instance.start({ ...base, plan: invalidSchema }))
+      .toThrow(/unsupported output schema/)
+    expect(schemaAdapter.engine.request).toBeUndefined()
 
     const mixed = plan()
     mixed.roles.push({ ...mixed.roles[0]!, roleId: 'second', transportProvider: 'codex' })

@@ -96,6 +96,7 @@ export interface AgentPlanComparisonCanvasProps {
   readonly selectedNodeId: string | null
   readonly onSelect: (nodeId: string) => void
   readonly now: number
+  readonly detailsId?: string
   readonly copy?: AgentPlanComparisonCanvasCopy
 }
 
@@ -211,6 +212,7 @@ function flowNodes(
   selectedNodeId: string | null,
   now: number,
   copy: AgentPlanComparisonCanvasCopy,
+  detailsId: string,
 ): readonly ComparisonFlowNode[] {
   const positions = new Map(layout.map(node => [node.id, node] as const))
   const roles = new Map(plan?.roles.map(role => [role.roleId, role] as const) ?? [])
@@ -253,8 +255,8 @@ function flowNodes(
       ariaLabel,
       domAttributes: {
         'data-comparison-node-id': node.id,
-        'aria-controls': 'agent-plan-comparison-details',
-        'aria-expanded': selectedNodeId === node.id,
+        'aria-controls': detailsId,
+        'aria-pressed': selectedNodeId === node.id,
       } as NonNullable<ComparisonFlowNode['domAttributes']>,
       width: placed.width,
       height: placed.height,
@@ -296,13 +298,26 @@ function motionDuration(): number {
 
 function AgentPlanComparisonCanvasInner({
   execution, plan, selectedNodeId, onSelect, now,
+  detailsId = 'agent-plan-comparison-details',
   copy = PLAN_COMPARISON_CANVAS_COPY_ZH,
 }: AgentPlanComparisonCanvasProps): ReactNode {
   const graph = useMemo(() => buildPlanComparisonGraph(execution, plan), [execution, plan])
-  const layout = useMemo(() => layoutPlanComparisonGraph(graph), [graph])
+  const topologyIdentity = useMemo(() => (
+    `${graph.nodes.map(node => `${node.id}:${node.kind}`).join('\u0000')}\u0001${graph.edges.map(edge => edge.id).join('\u0000')}`
+  ), [graph])
+  const layoutCache = useRef<{
+    readonly key: string
+    readonly value: readonly PlanComparisonLayoutNode[]
+  }>()
+  const layout = useMemo(() => {
+    if (layoutCache.current?.key === topologyIdentity) return layoutCache.current.value
+    const value = layoutPlanComparisonGraph(graph)
+    layoutCache.current = { key: topologyIdentity, value }
+    return value
+  }, [graph, topologyIdentity])
   const baselineNodes = useMemo(
-    () => flowNodes(graph, layout, execution, plan, selectedNodeId, now, copy),
-    [copy, execution, graph, layout, now, plan, selectedNodeId],
+    () => flowNodes(graph, layout, execution, plan, selectedNodeId, now, copy, detailsId),
+    [copy, detailsId, execution, graph, layout, now, plan, selectedNodeId],
   )
   const baselineById = useMemo(
     () => new Map(baselineNodes.map(node => [node.id, node] as const)),
@@ -314,9 +329,6 @@ function AgentPlanComparisonCanvasInner({
   const [layoutChanged, setLayoutChanged] = useState(false)
   const instance = useRef<ReactFlowInstance<ComparisonFlowNode, ComparisonFlowEdge> | null>(null)
   const updateNodeInternals = useUpdateNodeInternals()
-  const topologyIdentity = useMemo(() => (
-    `${graph.nodes.map(node => node.id).join('\u0000')}\u0001${graph.edges.map(edge => edge.id).join('\u0000')}`
-  ), [graph])
 
   const recordOffset = (id: string, position: { readonly x: number; readonly y: number }): void => {
     const baseline = baselineById.get(id)

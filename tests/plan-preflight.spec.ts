@@ -208,6 +208,44 @@ describe('Agent plan preflight', () => {
     ]))
   })
 
+  it('canonicalizes equivalent resource scopes before checking parallel writes', () => {
+    const left = { ...task('left'), resourceClaims: ['src/features'] }
+    const right = { ...task('right'), resourceClaims: ['src/./features//panel.tsx'] }
+    const result = preflightAgentPlan(plan([left, right]), capabilities())
+
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'task.parallel-write-conflict',
+      severity: 'error',
+      nodeIds: ['left', 'right'],
+    }))
+  })
+
+  it('treats the repository root claim as overlapping every parallel write scope', () => {
+    const left = { ...task('left'), resourceClaims: ['./'] }
+    const right = { ...task('right'), resourceClaims: ['src/features'] }
+    const result = preflightAgentPlan(plan([left, right]), capabilities())
+
+    expect(result.diagnostics.map(item => item.code)).toContain('task.parallel-write-conflict')
+  })
+
+  it('blocks output schemas outside the subset accepted by the DSH workflow engine', () => {
+    const candidate = plan([{
+      ...task('a'),
+      expectedOutput: {
+        description: 'A structured result.',
+        schema: { type: 'definitely-not-supported' },
+      },
+    }])
+    const result = preflightAgentPlan(candidate, capabilities())
+
+    expect(result.valid).toBe(false)
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'task.output-schema-invalid',
+      severity: 'error',
+      nodeIds: ['a'],
+    }))
+  })
+
   it('labels usage budgets honestly and blocks unsupported cost enforcement', () => {
     const candidate = plan([task('a')])
     candidate.budget.maxRequests = 20
@@ -220,6 +258,62 @@ describe('Agent plan preflight', () => {
       expect.objectContaining({ code: 'budget.tokens.advisory', severity: 'warning' }),
       expect.objectContaining({ code: 'budget.cost.unsupported', severity: 'error' }),
     ]))
+  })
+
+  it('blocks task-level budget hints before the Workflow adapter can reject an approved plan', () => {
+    const candidate = plan([task('a')])
+    candidate.tasks[0] = { ...candidate.tasks[0]!, budgetHint: { maxTokens: 2_000 } }
+    const result = preflightAgentPlan(candidate, capabilities())
+    expect(result.valid).toBe(false)
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'task.budget-hint-unsupported',
+      severity: 'error',
+      nodeIds: ['a'],
+    }))
+  })
+
+  it('assigns stable distinct ids to repeated diagnostic codes', () => {
+    const candidate = plan([task('a'), task('b')])
+    candidate.roles.push({
+      ...candidate.roles[0]!,
+      roleId: 'second',
+      name: 'Second',
+      llmProvider: 'catalog',
+      model: 'missing-b',
+    })
+    candidate.roles[0] = {
+      ...candidate.roles[0]!,
+      llmProvider: 'catalog',
+      model: 'missing-a',
+    }
+    candidate.tasks[1] = { ...candidate.tasks[1]!, roleId: 'second' }
+    const result = preflightAgentPlan(candidate, capabilities({
+      llmRoutes: [{ provider: 'catalog', models: [], catalogStatus: 'unavailable' }],
+    }))
+    const repeated = result.diagnostics.filter(item => item.code === 'provider.model-catalog-unavailable')
+    expect(repeated).toHaveLength(2)
+    expect(new Set(repeated.map(item => item.diagnosticId)).size).toBe(2)
+    expect(preflightAgentPlan(candidate, capabilities({
+      llmRoutes: [{ provider: 'catalog', models: [], catalogStatus: 'unavailable' }],
+    })).diagnostics.map(item => item.diagnosticId)).toEqual(result.diagnostics.map(item => item.diagnosticId))
+  })
+
+  it('blocks an unverified model omitted from an incomplete catalog', () => {
+    const candidate = plan([task('a')])
+    candidate.roles[0] = {
+      ...candidate.roles[0]!,
+      llmProvider: 'catalog',
+      model: 'possibly-truncated',
+    }
+    const result = preflightAgentPlan(candidate, capabilities({
+      llmRoutes: [{ provider: 'catalog', models: ['retained'], catalogStatus: 'incomplete' }],
+    }))
+
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'provider.model-catalog-incomplete',
+      severity: 'error',
+      nodeIds: ['researcher'],
+    }))
   })
 
   it('requires one transport for Workflow and gates experimental peer teams', () => {

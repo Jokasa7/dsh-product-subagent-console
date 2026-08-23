@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import type {
   ConnectionRpcHandler,
   HostConnectionRpc,
@@ -177,7 +177,8 @@ class ControlledWorkflowEngine extends WorkflowEngine {
 }
 
 function parent(id = 'plan-parent'): Agent {
-  return { id: SessionId(id) } as Agent
+  const sessionId = SessionId(id)
+  return { id: sessionId, session: { id: sessionId } } as Agent
 }
 
 function planContent(objective = 'Inspect two areas and synthesize the factual result.'): AgentPlanContent {
@@ -252,9 +253,10 @@ interface Fixture {
   readonly workflowFiber: ReturnType<Context['plugin']>
 }
 
-async function harness(): Promise<Fixture> {
+async function harness(planTools: { readonly toolName?: string; readonly executeToolName?: string } = {}): Promise<Fixture> {
   const ctx = new Context()
   contexts.push(ctx)
+  await ctx.plugin(AgentRegistry).await()
   await ctx.plugin(FakeSystemPromptService).await()
   await ctx.plugin(ToolRuntime).await()
   await ctx.plugin(SubagentRuntime).await()
@@ -262,8 +264,9 @@ async function harness(): Promise<Fixture> {
   const workflowFiber = ctx.plugin(ControlledWorkflowEngine)
   await workflowFiber.await()
   await ctx.plugin(ProductSubagentConsoleService).await()
+  ctx.agents.register(parent())
   ctx.subagents.registerProvider(new FixtureProvider())
-  await ctx.plugin(ProductSubagentPlanTool).await()
+  await ctx.plugin(ProductSubagentPlanTool, planTools).await()
   return {
     ctx,
     service: ctx.productSubagentConsole,
@@ -291,15 +294,15 @@ async function approve(
   if (!preflightResponse.ok) throw new Error(`preflight failed: ${preflightResponse.error.message}`)
   const preflight = planPreflightResultSchema.parse(preflightResponse.value)
   expect(preflight.valid).toBe(true)
-  const acceptedWarningCodes = preflight.diagnostics
+  const acceptedWarningIds = preflight.diagnostics
     .filter(item => item.severity === 'warning')
-    .map(item => item.code)
+    .map(item => item.diagnosticId)
   const approvedResponse = await fixture.connection.call(APPROVE_PLAN_ENDPOINT, {
     parentSessionId,
     planId: draft.planId,
     revision: draft.revision,
     capabilityDigest: capabilities.digest,
-    acceptedWarningCodes,
+    acceptedWarningIds,
   })
   if (!approvedResponse.ok) throw new Error(`approval failed: ${approvedResponse.error.message}`)
   return approvedResponse.value as AgentPlanRevision
@@ -309,15 +312,26 @@ function executePlan(
   fixture: Fixture,
   planId: string,
   revision: number,
+  grantId: string,
   parentSessionId = 'plan-parent',
 ) {
   return fixture.ctx.tools.execute({
     callId: CallId(`execute-${String(revision)}`),
     name: 'execute_subagent_plan',
-    arguments: { plan_id: planId, revision },
+    arguments: { plan_id: planId, revision, grant_id: grantId },
     agent: parent(parentSessionId),
     signal: new AbortController().signal,
   })
+}
+
+async function executeWithGrant(
+  fixture: Fixture,
+  planId: string,
+  revision: number,
+  parentSessionId = 'plan-parent',
+) {
+  const grant = await fixture.service.issuePlanExecutionGrant(parentSessionId, planId, revision)
+  return executePlan(fixture, planId, revision, grant.grantId, parentSessionId)
 }
 
 async function executionList(
@@ -338,10 +352,9 @@ describe('approved Agent plan Host/tool execution chain', () => {
       expectedRevision: 0,
     })
 
-    await expect(executePlan(fixture, draft.planId, draft.revision)).resolves.toMatchObject({
-      isError: true,
-      error: { message: expect.stringContaining('only an approved Agent plan revision can execute') },
-    })
+    await expect(fixture.service.issuePlanExecutionGrant(
+      'plan-parent', draft.planId, draft.revision,
+    )).rejects.toThrow('only an approved Agent plan revision can receive an execution grant')
     expect(fixture.workflow.runs).toHaveLength(0)
 
     const capabilities = await fixture.service.executionCapabilities('plan-parent')
@@ -357,7 +370,7 @@ describe('approved Agent plan Host/tool execution chain', () => {
       planId: draft.planId,
       revision: draft.revision,
       capabilityDigest: capabilities.digest,
-      acceptedWarningCodes: preflight.diagnostics.filter(item => item.severity === 'warning').map(item => item.code),
+      acceptedWarningIds: preflight.diagnostics.filter(item => item.severity === 'warning').map(item => item.diagnosticId),
     })
     expect(approvedResponse).toMatchObject({ ok: true })
 
@@ -368,13 +381,18 @@ describe('approved Agent plan Host/tool execution chain', () => {
       content: planContent('A newer draft that must not run when revision one is requested.'),
     })
     expect(second.revision).toBe(2)
-    await expect(executePlan(fixture, draft.planId, second.revision)).resolves.toMatchObject({
+    const mismatchedGrant = await fixture.service.issuePlanExecutionGrant(
+      'plan-parent', draft.planId, draft.revision,
+    )
+    await expect(executePlan(
+      fixture, draft.planId, second.revision, mismatchedGrant.grantId,
+    )).resolves.toMatchObject({
       isError: true,
-      error: { message: expect.stringContaining('only an approved Agent plan revision can execute') },
+      error: { message: expect.stringContaining('does not match this plan revision') },
     })
     expect(fixture.workflow.runs).toHaveLength(0)
 
-    const exact = executePlan(fixture, draft.planId, draft.revision)
+    const exact = executeWithGrant(fixture, draft.planId, draft.revision)
     await vi.waitFor(() => { expect(fixture.workflow.runs).toHaveLength(1) })
     const args = fixture.workflow.runs[0]?.request.args as WorkflowPlanArgs
     expect(args.objective).toBe(planContent().objective)
@@ -393,8 +411,13 @@ describe('approved Agent plan Host/tool execution chain', () => {
   it('rejects execution when the optional Workflow adapter is unavailable', async () => {
     const fixture = await harness()
     const approved = await approve(fixture)
+    const grant = await fixture.service.issuePlanExecutionGrant(
+      'plan-parent', approved.planId, approved.revision,
+    )
     await fixture.workflowFiber.dispose()
-    await expect(executePlan(fixture, approved.planId, approved.revision)).resolves.toMatchObject({
+    await expect(executePlan(
+      fixture, approved.planId, approved.revision, grant.grantId,
+    )).resolves.toMatchObject({
       isError: true,
       error: { message: expect.stringContaining('Workflow execution is unavailable') },
     })
@@ -404,7 +427,7 @@ describe('approved Agent plan Host/tool execution chain', () => {
   it('lists and long-polls session-isolated execution snapshots', async () => {
     const fixture = await harness()
     const approved = await approve(fixture)
-    const running = executePlan(fixture, approved.planId, approved.revision)
+    const running = executeWithGrant(fixture, approved.planId, approved.revision)
     await vi.waitFor(() => { expect(fixture.workflow.runs).toHaveLength(1) })
 
     const initial = await executionList(fixture, ['plan-parent'])
@@ -453,7 +476,7 @@ describe('approved Agent plan Host/tool execution chain', () => {
   it('routes cancellation by parent Session and reports terminal cancellation', async () => {
     const fixture = await harness()
     const approved = await approve(fixture)
-    const running = executePlan(fixture, approved.planId, approved.revision)
+    const running = executeWithGrant(fixture, approved.planId, approved.revision)
     await vi.waitFor(() => { expect(fixture.workflow.runs).toHaveLength(1) })
     const listed = await executionList(fixture, ['plan-parent'])
     const executionId = listed.executions[0]?.executionId
@@ -485,5 +508,80 @@ describe('approved Agent plan Host/tool execution chain', () => {
       parentSessionId: 'plan-parent',
       executionId,
     })).resolves.toEqual({ ok: true, value: { status: 'already-terminal' } })
+  })
+
+  it('reuses one queued grant for duplicate requests and consumes it exactly once', async () => {
+    const fixture = await harness()
+    const approved = await approve(fixture)
+    const first = await fixture.service.issuePlanExecutionGrant(
+      'plan-parent', approved.planId, approved.revision,
+    )
+    const repeated = await fixture.service.issuePlanExecutionGrant(
+      'plan-parent', approved.planId, approved.revision,
+    )
+    expect(repeated).toEqual(first)
+
+    const running = executePlan(fixture, approved.planId, approved.revision, first.grantId)
+    await vi.waitFor(() => { expect(fixture.workflow.runs).toHaveLength(1) })
+    await expect(executePlan(
+      fixture, approved.planId, approved.revision, repeated.grantId,
+    )).resolves.toMatchObject({
+      isError: true,
+      error: { message: expect.stringContaining('valid execution grant is required') },
+    })
+    await expect(fixture.service.issuePlanExecutionGrant(
+      'plan-parent', approved.planId, approved.revision,
+    )).rejects.toThrow('already has an active execution')
+    fixture.workflow.complete(0)
+    await expect(running).resolves.toMatchObject({ isError: false })
+  })
+
+  it('keeps a user grant valid behind a multi-minute conversation queue and still expires it later', async () => {
+    const fixture = await harness()
+    const approved = await approve(fixture)
+    const base = 10_000
+    const now = vi.spyOn(Date, 'now').mockReturnValue(base)
+    try {
+      const queuedGrant = await fixture.service.issuePlanExecutionGrant(
+        'plan-parent', approved.planId, approved.revision,
+      )
+      now.mockReturnValue(base + 3 * 60_000)
+      const running = executePlan(
+        fixture, approved.planId, approved.revision, queuedGrant.grantId,
+      )
+      await vi.waitFor(() => { expect(fixture.workflow.runs).toHaveLength(1) })
+      fixture.workflow.complete(0)
+      await expect(running).resolves.toMatchObject({ isError: false })
+
+      const expiringGrant = await fixture.service.issuePlanExecutionGrant(
+        'plan-parent', approved.planId, approved.revision,
+      )
+      now.mockReturnValue(expiringGrant.expiresAt + 1)
+      await expect(executePlan(
+        fixture, approved.planId, approved.revision, expiringGrant.grantId,
+      )).resolves.toMatchObject({
+        isError: true,
+        error: { message: expect.stringContaining('valid execution grant is required') },
+      })
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it('advertises and grants the exact configured planner tool names', async () => {
+    const fixture = await harness({
+      toolName: 'compose_agent_work',
+      executeToolName: 'run_agent_work',
+    })
+    const approved = await approve(fixture)
+    const capabilities = await fixture.service.executionCapabilities('plan-parent')
+    expect(capabilities.plannerTools).toEqual({
+      design: ['compose_agent_work'],
+      execute: ['run_agent_work'],
+    })
+    expect(capabilities.tools).toEqual(expect.arrayContaining(['compose_agent_work', 'run_agent_work']))
+    await expect(fixture.service.issuePlanExecutionGrant(
+      'plan-parent', approved.planId, approved.revision,
+    )).resolves.toMatchObject({ executeToolName: 'run_agent_work' })
   })
 })

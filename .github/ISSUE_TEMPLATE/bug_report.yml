@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible problem with the plugin
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve the plugin. Remove credentials, private prompts, and private task output before submitting.
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: 0.4.0-alpha.2
+    validations:
+      required: true
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version
+      placeholder: 0.1.1-rc.2
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, browser, and Provider when relevant.
+      placeholder: Windows 11, Chrome, Codex Provider
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the visible error and the state of Runtime, Plan, or Compare.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant diagnostics
+      description: Add sanitized Trajectory, browser-console, or Provider output if it helps reproduce the issue.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing Issues for the same problem.
+          required: true
+        - label: I removed credentials and private task content.
+          required: true

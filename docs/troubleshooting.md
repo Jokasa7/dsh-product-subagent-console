@@ -37,7 +37,8 @@ Select each reported issue in the Plan view and correct the referenced role or t
 - an unavailable transport Provider, model route, Agent Preset, or tool;
 - multiple transport Providers in one executable Workflow plan;
 - Agent Teams selected as the execution backend;
-- concurrency, budget, or resource conflicts.
+- unsupported task approval points, task budgets, or role tool allowlists;
+- concurrency or resource conflicts.
 
 Warnings must be reviewed and accepted before approval. Editing the draft requires a new save and preflight.
 
@@ -45,6 +46,8 @@ Warnings must be reviewed and accepted before approval. Editing the draft requir
 
 - Confirm that the exact approved revision is selected in Compare.
 - Run preflight again if the DSH profile, Provider, tools, or presets changed after approval.
+- Check Chat and Trajectory for the visible execution request and execution-tool call.
+- Confirm that the execution tool is still enabled in the current Agent Preset; create a new conversation after changing the preset.
 - Confirm that the selected Provider is installed, authenticated, and available.
 - Check Chat, Trajectory, and Provider logs for the reported error.
 
@@ -73,6 +76,6 @@ Align the plugin, Provider Bundles, and all DSH packages to the exact supported 
 
 ## Plans, execution history, or card positions disappear
 
-Plans and execution history are temporary for the current Host run. Manually adjusted card positions are local to the current page and are not restored after a page restart.
+Plans and execution history are temporary for the current DSH Web process. Manually adjusted card positions are local to the current page and are not restored after a page restart.
 
 If a problem remains reproducible, open a [GitHub Issue](https://github.com/Jokasa7/dsh-product-subagent-console/issues) with the DSH version, plugin version, Provider name, browser, and visible error. Remove credentials and private task content before posting.

@@ -4,6 +4,12 @@ import type {
 import type { ConsoleSnapshot, ObservedRunView, OwnedAttemptView } from '../types.js'
 
 type CatalogEntry = Extract<SubagentCatalogSnapshot['entries'][number], { kind: 'child' }>
+const MAX_PARENT_SESSION_IDS = 64
+
+export interface TreeParentScope {
+  readonly ids: readonly SessionId[]
+  readonly truncated: boolean
+}
 
 /** Normalized states rendered by native, observed, and plugin-owned nodes. */
 export type WorkbenchState =
@@ -70,29 +76,81 @@ export function collectTreeParentIds(
   summaries: Readonly<Record<SessionId, SessionSummary>>,
   catalogs: SessionListState['subagentsByParent'],
 ): readonly SessionId[] {
-  const found = new Set<SessionId>([rootSessionId])
-  let changed = true
-  while (changed && found.size < 64) {
-    changed = false
-    for (const summary of Object.values(summaries)) {
-      if (
-        summary.origin !== 'subagent'
-        || summary.parentId === undefined
-        || !found.has(summary.parentId)
-        || found.has(summary.id)
-      ) continue
-      found.add(summary.id)
-      changed = true
-    }
-    for (const parentId of [...found]) {
-      for (const entry of catalogChildren(parentId, catalogs)) {
-        if (found.has(entry.id) || found.size >= 64) continue
-        found.add(entry.id)
-        changed = true
-      }
+  return collectTreeParentScope(rootSessionId, summaries, catalogs).ids
+}
+
+/** Collect a deterministic bounded RPC scope and report when descendants were omitted. */
+export function collectTreeParentScope(
+  rootSessionId: SessionId,
+  summaries: Readonly<Record<SessionId, SessionSummary>>,
+  catalogs: SessionListState['subagentsByParent'],
+): TreeParentScope {
+  const childrenByParent = new Map<SessionId, Set<SessionId>>()
+  const active = new Set<SessionId>()
+  const addChild = (parentId: SessionId, childId: SessionId): void => {
+    const children = childrenByParent.get(parentId) ?? new Set<SessionId>()
+    children.add(childId)
+    childrenByParent.set(parentId, children)
+  }
+  for (const summary of Object.values(summaries)) {
+    if (summary.running) active.add(summary.id)
+    if (summary.origin !== 'subagent' || summary.parentId === undefined) continue
+    addChild(summary.parentId, summary.id)
+  }
+  for (const [rawParentId, catalog] of Object.entries(catalogs)) {
+    const parentId = rawParentId as SessionId
+    for (const entry of catalog.entries) {
+      if (entry.kind !== 'child') continue
+      addChild(parentId, entry.id)
+      if (entry.activity === 'running') active.add(entry.id)
     }
   }
-  return [...found]
+
+  const reachable = new Set<SessionId>([rootSessionId])
+  const reachableParent = new Map<SessionId, SessionId>()
+  const queue: SessionId[] = [rootSessionId]
+  let cursor = 0
+  while (cursor < queue.length) {
+    const parentId = queue[cursor]
+    cursor += 1
+    if (parentId === undefined) break
+    const candidates = [...(childrenByParent.get(parentId) ?? [])]
+      .sort((left, right) => String(left).localeCompare(String(right)))
+    for (const childId of candidates) {
+      if (reachable.has(childId)) continue
+      reachable.add(childId)
+      reachableParent.set(childId, parentId)
+      queue.push(childId)
+    }
+  }
+
+  const selected = new Set<SessionId>([rootSessionId])
+  const candidates = [...reachable].filter(id => id !== rootSessionId).sort((left, right) => {
+    const leftActive = active.has(left)
+    const rightActive = active.has(right)
+    if (leftActive !== rightActive) return leftActive ? -1 : 1
+    const recent = (summaries[right]?.updatedAt ?? 0) - (summaries[left]?.updatedAt ?? 0)
+    return recent !== 0 ? recent : String(left).localeCompare(String(right))
+  })
+  for (const candidate of candidates) {
+    if (selected.has(candidate)) continue
+    const path: SessionId[] = []
+    const pathSeen = new Set<SessionId>()
+    let current: SessionId | undefined = candidate
+    while (current !== undefined && !selected.has(current)) {
+      if (pathSeen.has(current)) {
+        path.length = 0
+        break
+      }
+      pathSeen.add(current)
+      path.push(current)
+      current = reachableParent.get(current)
+    }
+    if (current === undefined || selected.size + path.length > MAX_PARENT_SESSION_IDS) continue
+    for (const id of path.reverse()) selected.add(id)
+    if (selected.size >= MAX_PARENT_SESSION_IDS) break
+  }
+  return { ids: [...selected], truncated: selected.size < reachable.size }
 }
 
 function catalogChildren(
@@ -127,14 +185,16 @@ export function buildWorkbenchTree(input: {
   readonly catalogs: SessionListState['subagentsByParent']
   readonly summaries: Readonly<Record<SessionId, SessionSummary>>
   readonly snapshot?: ConsoleSnapshot
+  readonly includedSessionIds?: ReadonlySet<SessionId>
 }): readonly WorkbenchNode[] {
-  const { rootSessionId, catalogs, summaries, snapshot } = input
+  const { rootSessionId, catalogs, summaries, snapshot, includedSessionIds } = input
   const visiting = new Set<SessionId>()
 
   const childrenOf = (parentSessionId: SessionId): readonly WorkbenchNode[] => {
     if (visiting.has(parentSessionId)) return []
     visiting.add(parentSessionId)
     const nativeEntries = catalogChildren(parentSessionId, catalogs)
+      .filter(entry => includedSessionIds?.has(entry.id) ?? true)
     const nativeIds = new Set(nativeEntries.map(entry => String(entry.id)))
     const localRunByChildId = new Map<string, ObservedRunView>()
     for (const run of snapshot?.runs ?? []) {

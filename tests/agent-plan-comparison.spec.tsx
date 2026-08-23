@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { createElement } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -45,6 +45,7 @@ afterEach(() => { cleanup() })
 const sessionId = 'parent-session' as SessionId
 const planId = 'df21e108-191d-4b1c-8e25-b2a8a64450a3'
 const executionId = '856bcae4-0f32-4461-820b-dfde09415d64'
+const grantId = '976c61ec-d398-4182-8a9f-e55d249461ec'
 const attemptOne = '05730562-eb6d-4367-8fbd-8a0bb87f6b8e'
 const attemptTwo = 'b1a4389c-c28a-432b-a640-1ab85d847b43'
 
@@ -58,7 +59,7 @@ function plan(): AgentPlanRevision {
     createdAt: 900,
     updatedAt: 1_000,
     capabilityDigest: 'capability-one',
-    acceptedWarningCodes: [],
+    acceptedWarningIds: [],
     title: 'Release review',
     objective: 'Review the release and merge evidence.',
     successCriteria: ['Every finding is evidenced'],
@@ -152,7 +153,13 @@ function snapshot(value = execution()): PlanExecutionRepositorySnapshot {
 function actions(): AgentPlanComparisonActions {
   const cancelled: CancelPlanExecutionResult = { status: 'requested' }
   return {
-    requestExecution: vi.fn(async () => {}),
+    requestExecution: vi.fn(async request => ({
+      grantId,
+      ...request,
+      capabilityDigest: 'capability-one',
+      executeToolName: 'execute_subagent_plan',
+      expiresAt: Date.now() + 12 * 60 * 60_000,
+    })),
     cancelExecution: vi.fn(async () => cancelled),
   }
 }
@@ -232,12 +239,98 @@ describe('Agent plan comparison controls', () => {
     expect(screen.getByText('No execution history yet')).toBeTruthy()
   })
 
+  it('prevents another request while the selected revision is active', () => {
+    render(createElement(AgentPlanComparison, {
+      sessionId,
+      plans: [plan()],
+      executionSnapshot: snapshot(),
+      actions: actions(),
+    }))
+
+    const button = screen.getByRole('button', { name: '该修订正在运行' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+  })
+
+  it('shows a pending state immediately after one execution request', async () => {
+    const callbacks = actions()
+    render(createElement(AgentPlanComparison, {
+      sessionId,
+      plans: [plan()],
+      executionSnapshot: { ...snapshot(), executions: [] },
+      actions: callbacks,
+    }))
+
+    fireEvent.click(screen.getByRole('button', { name: '请求执行' }))
+    const pending = await screen.findByRole('button', { name: '等待执行开始' }) as HTMLButtonElement
+    expect(pending.disabled).toBe(true)
+    expect(callbacks.requestExecution).toHaveBeenCalledOnce()
+  })
+
+  it('does not mistake a historical execution for the newly queued request', async () => {
+    const callbacks = actions()
+    const historical = {
+      ...execution([]),
+      status: 'succeeded' as const,
+      finishedAt: 1_200,
+    }
+    const { rerender } = render(createElement(AgentPlanComparison, {
+      sessionId,
+      plans: [plan()],
+      executionSnapshot: snapshot(historical),
+      actions: callbacks,
+    }))
+
+    fireEvent.click(screen.getByRole('button', { name: '请求执行' }))
+    expect(await screen.findByRole('button', { name: '等待执行开始' })).toBeTruthy()
+
+    rerender(createElement(AgentPlanComparison, {
+      sessionId,
+      plans: [plan()],
+      executionSnapshot: {
+        ...snapshot(historical),
+        executions: [historical, {
+          ...historical,
+          executionId: '59fc7322-7e19-4c2c-b2de-c9c3c4559566',
+          createdAt: 2_000,
+          finishedAt: 2_100,
+        }],
+      },
+      actions: callbacks,
+    }))
+    await waitFor(() => {
+      expect((screen.getByRole('button', { name: '请求执行' }) as HTMLButtonElement).disabled).toBe(false)
+    })
+  })
+
+  it('keeps a queued request pending beyond two minutes while its grant remains valid', async () => {
+    vi.useFakeTimers()
+    try {
+      render(createElement(AgentPlanComparison, {
+        sessionId,
+        plans: [plan()],
+        executionSnapshot: { ...snapshot(), executions: [] },
+        actions: actions(),
+      }))
+
+      fireEvent.click(screen.getByRole('button', { name: '请求执行' }))
+      await act(async () => {})
+      expect(screen.getByRole('button', { name: '等待执行开始' })).toBeTruthy()
+      await act(async () => { vi.advanceTimersByTime(3 * 60_000) })
+      expect(screen.getByRole('button', { name: '等待执行开始' })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('requests the selected approved revision and cancels the exact active execution', async () => {
     const callbacks = actions()
     render(createElement(AgentPlanComparison, {
       sessionId,
       plans: [plan()],
-      executionSnapshot: snapshot(),
+      executionSnapshot: snapshot({
+        ...execution([]),
+        planRevision: 2,
+      }),
       actions: callbacks,
     }))
 

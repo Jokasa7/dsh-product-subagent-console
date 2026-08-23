@@ -319,7 +319,7 @@ describe('ProductSubagentConsoleService with DSH 0.1.1-rc.2 runtimes', () => {
       planId: first.planId,
       revision: 2,
       capabilityDigest: capabilities.digest,
-      acceptedWarningCodes: [],
+      acceptedWarningIds: [],
     }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'command-error' } })
 
     await expect(connection.handler?.('planner.save', {

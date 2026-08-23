@@ -10,7 +10,7 @@
 - Node.js `^22.19.0` 或 `>=24.0.0`
 - 一个可正常运行的 DSH Web Profile
 
-只有委派任务或方案使用外部 coding Agent 时，才需要安装对应的兼容 Provider Bundle。
+如果只查看 DSH 原生子会话，外部 Provider 可以不安装。创建和执行 Agent 方案时，当前至少需要一个已安装并配置完成的兼容子代理 Provider。
 
 ## 安装
 
@@ -20,7 +20,7 @@
 
 ```sh
 sha256sum --check SHA256SUMS.txt
-dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.1.tgz
+dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
 dsh --profile web --dump-config
 ```
 
@@ -29,7 +29,7 @@ dsh --profile web --dump-config
 在 Windows PowerShell 中，可将下面命令的结果与 `SHA256SUMS.txt` 对照：
 
 ```powershell
-Get-FileHash .\dsh-product-subagent-console-0.4.0-alpha.1.tgz -Algorithm SHA256
+Get-FileHash .\dsh-product-subagent-console-0.4.0-alpha.2.tgz -Algorithm SHA256
 ```
 
 ## 添加外部 Provider
@@ -70,10 +70,10 @@ dsh plugin --profile web add @deepseek-ai/dsh-subagent-claude-code@0.1.1-rc.2
 **子代理**页签包含三种模式：
 
 - **运行**显示当前和已完成的委派任务。可以平移、缩放和整理卡片，选择卡片查看详情，或打开原生子会话。
-- **方案**用于生成或手动创建 Agent 方案。编辑并保存草案，运行预检，确认警告，然后批准需要执行的精确修订。
-- **对照**用于启动已批准方案，并把每项计划任务与真实尝试并列显示。可以查看状态与耗时，也可在执行仍处于活动状态时请求取消。
+- **方案**用于生成或手动创建 Agent 方案。编辑并保存草案，运行预检，确认警告，然后批准需要执行的指定修订版本。
+- **对照**会请求当前对话执行已批准方案，并把每项计划任务与实际执行记录并列显示。可以查看状态与耗时，也可在执行仍处于活动状态时请求取消。
 
-方案与执行记录只在当前 Host 运行期间临时保留。完整流程见 [Agent 方案设计器](agent-planner.zh.md)。
+方案与执行记录只在当前 DSH Web 进程中临时保留。完整流程见 [Agent 方案设计器](agent-planner.zh.md)。
 
 ## 更新
 

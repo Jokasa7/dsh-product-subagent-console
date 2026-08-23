@@ -16,11 +16,13 @@ import {
   EXECUTION_CAPABILITIES_ENDPOINT,
   executionCapabilitiesRequestSchema,
   executionCapabilitySnapshotSchema,
+  ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT,
   LIST_PLAN_EXECUTIONS_ENDPOINT,
   listPlanExecutionsRequestSchema,
   LIST_PLANS_ENDPOINT,
   listPlansRequestSchema,
   planExecutionRepositorySnapshotSchema,
+  planExecutionGrantSchema,
   planPreflightResultSchema,
   planRepositorySnapshotSchema,
   planRevisionRequestSchema,
@@ -34,6 +36,7 @@ import {
   type CancelPlanExecutionRequest,
   type CancelPlanExecutionResult,
   type ExecutionCapabilitySnapshot,
+  type PlanExecutionGrant,
   type PlanExecutionRepositorySnapshot,
   type PlanRevisionRequest,
 } from '../plan-types.js'
@@ -76,7 +79,7 @@ export interface PlannerWorkbenchInjected extends AgentPlanWorkbenchInjected {
     parentSessionId: SessionId,
     request: PlanRevisionRequest,
     signal: AbortSignal,
-  ) => Promise<void>
+  ) => Promise<PlanExecutionGrant>
 }
 
 /** Complete browser-injected surface for the runtime and planner workbench modes. */
@@ -189,17 +192,32 @@ export function apply(ctx: ClientContext): void {
           signal,
         )
         const capabilities = executionCapabilitySnapshotSchema.parse(capabilityValue)
-        if (capabilities.scopeStatus === 'available' && !capabilities.tools.includes('design_subagent_plan')) {
-          throw new Error('product-subagent-console: design_subagent_plan is unavailable in the current Agent scope')
+        const designToolName = capabilities.plannerTools?.design.find(name => capabilities.tools.includes(name))
+        if (capabilities.scopeStatus !== 'available' || designToolName === undefined) {
+          throw new Error('product-subagent-console: the plan design tool is unavailable in the current Agent scope')
         }
         const binding = sessions.binding(sessionId)
         if (binding === undefined) {
           throw new Error('product-subagent-console: current session is unavailable')
         }
+        const english = t('locale.code') === 'en'
         const result = await binding.session.prompt([{
           type: 'text',
-          text: [
-            '请为以下目标设计一个可执行的多 Agent 方案，并调用 design_subagent_plan 工具将方案保存为草稿。',
+          text: (english ? [
+            `Design an executable multi-Agent plan for the objective below and call ${designToolName} to save it as a draft.`,
+            'Only design and save the plan. Do not start any child Agent.',
+            'Use only the capabilities listed below; do not assume that any unlisted Provider, model, tool, or backend exists.',
+            `Workflow backend: ${capabilities.adapters.workflow ? 'available' : 'unavailable'}; Agent Teams backend: unavailable for execution.`,
+            `Transport Providers: ${capabilities.transportProviders.map(provider => (
+              `${provider.name}(context=${provider.inheritsParentContext ? 'fork' : 'fresh'},modelRouting=${provider.modelRouting})`
+            )).join(', ') || 'none'}`,
+            `Budget limits: at most ${String(capabilities.limits.maxAgents)} Agents and ${String(capabilities.limits.maxConcurrent)} concurrent Agents.`,
+            'A Workflow plan must use one Transport Provider, inherit tools (toolPolicy.mode=inherit), and omit Agent Presets.',
+            'Only set llmProvider or model when the selected Transport Provider reports modelRouting=enforced.',
+            '',
+            `Objective: ${normalizedObjective}`,
+          ] : [
+            `请为以下目标设计一个可执行的多 Agent 方案，并调用 ${designToolName} 工具将方案保存为草稿。`,
             '这一步只生成和保存方案，不要启动任何子代理。',
             '只能使用下面列出的当前能力；不要假设未列出的 Provider、模型、工具或执行后端存在。',
             `Workflow 后端：${capabilities.adapters.workflow ? '可用' : '不可用'}；Agent Teams 后端：不可执行。`,
@@ -211,7 +229,7 @@ export function apply(ctx: ClientContext): void {
             '仅当所选 Transport Provider 的 modelRouting=enforced 时才填写 llmProvider 或 model。',
             '',
             `目标：${normalizedObjective}`,
-          ].join('\n'),
+          ]).join('\n'),
         }], 'queue', signal)
         if (!result.ok) {
           throw new Error(`product-subagent-console prompt failed: ${result.error.code}`)
@@ -256,36 +274,29 @@ export function apply(ctx: ClientContext): void {
         if (request.parentSessionId !== String(sessionId)) {
           throw new Error('product-subagent-console: execution request does not belong to current session')
         }
-        const capabilityRequest = executionCapabilitiesRequestSchema.parse({
-          parentSessionId: String(sessionId),
-        })
-        const capabilityValue = await callPlanner(
-          EXECUTION_CAPABILITIES_ENDPOINT,
-          capabilityRequest,
-          signal,
-        )
-        const capabilities = executionCapabilitySnapshotSchema.parse(capabilityValue)
-        if (!capabilities.adapters.workflow) {
-          throw new Error('product-subagent-console: Workflow execution is unavailable')
-        }
-        if (capabilities.scopeStatus === 'available' && !capabilities.tools.includes('execute_subagent_plan')) {
-          throw new Error('product-subagent-console: execute_subagent_plan is unavailable in the current Agent scope')
-        }
+        const grantValue = await callPlanner(ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT, request, signal)
+        const grant = planExecutionGrantSchema.parse(grantValue)
         const binding = sessions.binding(sessionId)
         if (binding === undefined) {
           throw new Error('product-subagent-console: current session is unavailable')
         }
+        const english = t('locale.code') === 'en'
         const result = await binding.session.prompt([{
           type: 'text',
-          text: [
+          text: (english ? [
+            'Execute the exact revision that I approved in Agent Planner.',
+            `Call ${grant.executeToolName} with plan_id=${request.planId}, revision=${String(request.revision)}, and grant_id=${grant.grantId}.`,
+            'Do not rewrite the plan or substitute another revision. Report the blocker if preflight or capabilities changed.',
+          ] : [
             '请执行我已在 Agent 方案设计器中批准的精确修订。',
-            `请调用 execute_subagent_plan，参数 plan_id=${request.planId}、revision=${String(request.revision)}。`,
+            `请调用 ${grant.executeToolName}，参数 plan_id=${request.planId}、revision=${String(request.revision)}、grant_id=${grant.grantId}。`,
             '不要改写方案，不要改用其他修订；如果预检或能力已变化，请报告阻塞原因。',
-          ].join('\n'),
+          ]).join('\n'),
         }], 'queue', signal)
         if (!result.ok) {
           throw new Error(`product-subagent-console prompt failed: ${result.error.code}`)
         }
+        return grant
       },
       async watchSessions(
         parentSessionIds: readonly SessionId[],

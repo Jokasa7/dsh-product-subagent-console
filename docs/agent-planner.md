@@ -61,8 +61,11 @@ While an execution is queued or running, **Cancel execution** requests cancellat
 
 - Approved plans execute through DSH Workflow.
 - One Workflow execution currently uses one transport Provider across its roles.
+- Role tool policies must inherit the Provider defaults. Role-level allowlists and Agent Presets are not currently executable.
+- Task approval points and task-level token or cost hints are not currently executable.
+- Output schemas are available only when the selected Provider reports support.
+- Plan-level Agent count, concurrency, and timeout are enforced. Request and token limits may be advisory; cost limits are not currently enforceable.
 - Agent Teams is not currently an executable backend.
-- Request, token, and cost limits may be enforced, advisory, or unavailable depending on the active Provider. Preflight shows the available support.
-- Plans and execution history are held for the current Host run and are cleared when that Host restarts.
+- Plans and execution history are held for the current DSH Web process and are cleared when that process restarts.
 
 For setup or execution errors, see [Troubleshooting](troubleshooting.md).

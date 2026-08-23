@@ -52,8 +52,22 @@ jobs:
       - name: Typecheck, test, and build distribution
         run: pnpm run build
 
+      - name: Check tracked public tree and whitespace
+        shell: bash
+        run: |
+          pnpm run verify:public
+          git diff --check
+
       - name: Verify publishable tarball inventory
         run: pnpm run pack:check
+
+      - name: Install Chromium headless shell
+        if: runner.os == 'Linux'
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
+      - name: Smoke packed plugin in a clean DSH Web profile
+        if: runner.os == 'Linux'
+        run: pnpm run smoke:web
 
       - name: Check package metadata
         run: pnpm publint

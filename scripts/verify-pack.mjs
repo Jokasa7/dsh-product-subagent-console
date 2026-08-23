@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { assertPublicTextFile, isPublicTextPath } from './public-text-policy.mjs'
+import { assertPublicJpeg, assertPublicTextFile, isPublicTextPath } from './public-text-policy.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
@@ -117,6 +117,7 @@ const required = [
   'docs/agent-planner.zh.md',
   'docs/troubleshooting.md',
   'docs/troubleshooting.zh.md',
+  'docs/assets/agent-plan-en.jpg',
   'docs/assets/subagent-canvas-live.jpg',
   'LICENSE',
   'NOTICE',
@@ -145,6 +146,7 @@ for (const path of normalized) {
   }
   const allowed = allowedRootFiles.has(path)
     || path.startsWith('lib/')
+    || path === 'docs/assets/agent-plan-en.jpg'
     || path === 'docs/assets/subagent-canvas-live.jpg'
     || /^(?:docs\/(?:agent-planner|getting-started|troubleshooting)(?:\.zh)?\.md)$/.test(path)
   if (!allowed) throw new Error(`tarball contains a non-publishable path: ${path}`)
@@ -162,9 +164,8 @@ if (compressedSize > 2_000_000) {
   throw new Error(`tarball exceeds the 2 MB compressed safety budget: ${compressedSize}`)
 }
 
-const screenshot = readFileSync(resolve(root, 'docs/assets/subagent-canvas-live.jpg'))
-if (screenshot.length < 3 || screenshot[0] !== 0xff || screenshot[1] !== 0xd8 || screenshot[2] !== 0xff) {
-  throw new Error('docs/assets/subagent-canvas-live.jpg is not a JPEG file')
+for (const asset of ['docs/assets/agent-plan-en.jpg', 'docs/assets/subagent-canvas-live.jpg']) {
+  assertPublicJpeg(resolve(root, asset))
 }
 
 const publishedManifest = entry.files.find(file => {

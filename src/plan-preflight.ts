@@ -9,6 +9,29 @@ import {
   type PlanTask,
   parseAgentPlanRevision,
 } from './plan-types.js'
+import { outputSchemaError } from './plan-validation.js'
+
+function stableDiagnosticId(
+  code: string,
+  message: string,
+  nodeIds: readonly string[],
+  fixHint?: string,
+  support?: CapabilitySupport,
+): string {
+  const source = JSON.stringify([
+    code,
+    [...new Set(nodeIds)].sort(),
+    message,
+    fixHint ?? '',
+    support ?? '',
+  ])
+  let hash = 0x811c9dc5
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `${code}:${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
 
 function diagnostic(
   severity: PlanDiagnostic['severity'],
@@ -20,11 +43,13 @@ function diagnostic(
     readonly support?: CapabilitySupport
   } = {},
 ): PlanDiagnostic {
+  const nodeIds = [...(options.nodeIds ?? [])]
   return {
+    diagnosticId: stableDiagnosticId(code, message, nodeIds, options.fixHint, options.support),
     severity,
     code,
     message,
-    nodeIds: [...(options.nodeIds ?? [])],
+    nodeIds,
     ...(options.fixHint === undefined ? {} : { fixHint: options.fixHint }),
     ...(options.support === undefined ? {} : { support: options.support }),
   }
@@ -74,13 +99,15 @@ export function deriveParallelWaves(tasks: readonly PlanTask[]): readonly (reado
 }
 
 function normalizeScope(value: string): string {
-  return value.trim().replaceAll('\\', '/').replace(/\/+$/u, '').toLocaleLowerCase('en-US')
+  const segments = value.trim().replaceAll('\\', '/').split('/')
+    .filter(segment => segment.length > 0 && segment !== '.')
+  return (segments.length === 0 ? '.' : segments.join('/')).toLocaleLowerCase('en-US')
 }
 
 function scopesOverlap(left: string, right: string): boolean {
   const a = normalizeScope(left)
   const b = normalizeScope(right)
-  if (a.length === 0 || b.length === 0) return false
+  if (a === '.' || b === '.') return true
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
 }
 
@@ -173,15 +200,20 @@ export function preflightAgentPlan(
           { nodeIds: [role.roleId] },
         ))
       } else if (role.model !== undefined && !route.models.includes(role.model)) {
+        const incomplete = route.catalogStatus === 'incomplete'
         diagnostics.push(diagnostic(
-          'warning',
+          incomplete ? 'error' : 'warning',
           route.catalogStatus === 'available'
             ? 'provider.model-not-in-advisory-catalog'
-            : 'provider.model-catalog-unavailable',
+            : incomplete
+              ? 'provider.model-catalog-incomplete'
+              : 'provider.model-catalog-unavailable',
           route.catalogStatus === 'available'
             ? `Model "${role.model}" is not listed in the advisory catalog for "${role.llmProvider}".`
-            : `The model catalog for "${role.llmProvider}" is unavailable; model membership is unknown.`,
-          { nodeIds: [role.roleId], support: 'advisory' },
+            : incomplete
+              ? `The model catalog for "${role.llmProvider}" was truncated; the requested model cannot be verified.`
+              : `The model catalog for "${role.llmProvider}" is unavailable; model membership is unknown.`,
+          { nodeIds: [role.roleId], support: incomplete ? 'unsupported' : 'advisory' },
         ))
       }
     } else if (role.model !== undefined) {
@@ -277,12 +309,38 @@ export function preflightAgentPlan(
     }
     const role = roles.get(task.roleId)
     const provider = role === undefined ? undefined : providerCapabilities.get(role.transportProvider)
-    if (task.expectedOutput.schema !== undefined && provider !== undefined && !provider.outputSchema) {
+    if (task.expectedOutput.schema !== undefined) {
+      const schemaError = outputSchemaError(task.expectedOutput.schema)
+      if (schemaError !== undefined) {
+        diagnostics.push(diagnostic(
+          'error',
+          'task.output-schema-invalid',
+          `The output schema for task "${task.title}" is not supported: ${schemaError}`,
+          {
+            nodeIds: [task.taskId],
+            fixHint: 'Use the DSH object JSON Schema subset or remove the schema.',
+            support: 'unsupported',
+          },
+        ))
+      } else if (provider !== undefined && !provider.outputSchema) {
+        diagnostics.push(diagnostic(
+          'error',
+          'task.output-schema-unsupported',
+          `Provider "${provider.name}" cannot enforce the output schema for task "${task.title}".`,
+          { nodeIds: [task.taskId], support: 'unsupported' },
+        ))
+      }
+    }
+    if (task.budgetHint !== undefined) {
       diagnostics.push(diagnostic(
         'error',
-        'task.output-schema-unsupported',
-        `Provider "${provider.name}" cannot enforce the output schema for task "${task.title}".`,
-        { nodeIds: [task.taskId], support: 'unsupported' },
+        'task.budget-hint-unsupported',
+        `The selected execution adapter cannot enforce the task budget hint for "${task.title}".`,
+        {
+          nodeIds: [task.taskId],
+          fixHint: 'Remove the task budget hint or use an adapter that explicitly supports per-task budgets.',
+          support: 'unsupported',
+        },
       ))
     }
   }
