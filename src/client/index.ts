@@ -24,6 +24,7 @@ import {
   planExecutionRepositorySnapshotSchema,
   planExecutionGrantSchema,
   planPreflightResultSchema,
+  plannerRpcReasonSchema,
   planRepositorySnapshotSchema,
   planRevisionRequestSchema,
   PREFLIGHT_PLAN_ENDPOINT,
@@ -93,6 +94,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 export const inject = ['slots', 'locale', 'connection', 'sessions']
 
+function plannerRpcFailureLabel(error: { readonly code: string; readonly message: string }): string {
+  if (error.code !== 'command-error') return error.code
+  const reason = /^\[([a-z0-9-]{1,64})\](?:\s|$)/u.exec(error.message)?.[1]
+  const parsed = plannerRpcReasonSchema.safeParse(reason)
+  return parsed.success ? parsed.data : error.code
+}
+
 /** Register the third conversation tab and its one batched loopback RPC reader. */
 export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as unknown as ConnectionHandle
@@ -108,7 +116,9 @@ export function apply(ctx: ClientContext): void {
       payload,
       signal,
     )
-    if (!result.ok) throw new Error(`product-subagent-console RPC failed: ${result.error.code}`)
+    if (!result.ok) {
+      throw new Error(`product-subagent-console RPC failed: ${plannerRpcFailureLabel(result.error)}`)
+    }
     return result.value
   }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-product-subagent-console: dictionaries')

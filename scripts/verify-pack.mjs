@@ -113,12 +113,24 @@ const required = [
   'SECURITY.md',
   'docs/getting-started.md',
   'docs/getting-started.zh.md',
+  'docs/product-tour.md',
+  'docs/product-tour.zh.md',
   'docs/agent-planner.md',
   'docs/agent-planner.zh.md',
   'docs/troubleshooting.md',
   'docs/troubleshooting.zh.md',
+  'docs/assets/agent-runtime-en.jpg',
   'docs/assets/agent-plan-en.jpg',
-  'docs/assets/subagent-canvas-live.jpg',
+  'docs/assets/agent-compare-en.jpg',
+  'docs/assets/agent-runtime-zh.jpg',
+  'docs/assets/agent-plan-zh.jpg',
+  'docs/assets/agent-compare-zh.jpg',
+  'docs/assets/workflow-plan-task-zh.jpg',
+  'docs/assets/workflow-preflight-ready-zh.jpg',
+  'docs/assets/workflow-preflight-blocked-zh.jpg',
+  'docs/assets/workflow-runtime-live-zh.jpg',
+  'docs/assets/workflow-compare-success-zh.jpg',
+  'docs/assets/workflow-compare-cancelled-zh.jpg',
   'LICENSE',
   'NOTICE',
   'THIRD_PARTY_NOTICES.md',
@@ -146,9 +158,9 @@ for (const path of normalized) {
   }
   const allowed = allowedRootFiles.has(path)
     || path.startsWith('lib/')
-    || path === 'docs/assets/agent-plan-en.jpg'
-    || path === 'docs/assets/subagent-canvas-live.jpg'
-    || /^(?:docs\/(?:agent-planner|getting-started|troubleshooting)(?:\.zh)?\.md)$/.test(path)
+    || /^docs\/assets\/agent-(?:runtime|plan|compare)-(?:en|zh)\.jpg$/.test(path)
+    || /^docs\/assets\/workflow-(?:plan-task|preflight-ready|preflight-blocked|runtime-live|compare-success|compare-cancelled)-zh\.jpg$/.test(path)
+    || /^(?:docs\/(?:agent-planner|getting-started|product-tour|troubleshooting)(?:\.zh)?\.md)$/.test(path)
   if (!allowed) throw new Error(`tarball contains a non-publishable path: ${path}`)
   if (path.endsWith('.map')) throw new Error(`tarball contains a source map: ${path}`)
   if (/(?:^|\/)(?:\.env(?:\.|$)|src|tests?|scripts|node_modules)(?:\/|$)/i.test(path)) {
@@ -164,7 +176,20 @@ if (compressedSize > 2_000_000) {
   throw new Error(`tarball exceeds the 2 MB compressed safety budget: ${compressedSize}`)
 }
 
-for (const asset of ['docs/assets/agent-plan-en.jpg', 'docs/assets/subagent-canvas-live.jpg']) {
+for (const asset of [
+  'docs/assets/agent-runtime-en.jpg',
+  'docs/assets/agent-plan-en.jpg',
+  'docs/assets/agent-compare-en.jpg',
+  'docs/assets/agent-runtime-zh.jpg',
+  'docs/assets/agent-plan-zh.jpg',
+  'docs/assets/agent-compare-zh.jpg',
+  'docs/assets/workflow-plan-task-zh.jpg',
+  'docs/assets/workflow-preflight-ready-zh.jpg',
+  'docs/assets/workflow-preflight-blocked-zh.jpg',
+  'docs/assets/workflow-runtime-live-zh.jpg',
+  'docs/assets/workflow-compare-success-zh.jpg',
+  'docs/assets/workflow-compare-cancelled-zh.jpg',
+]) {
   assertPublicJpeg(resolve(root, asset))
 }
 

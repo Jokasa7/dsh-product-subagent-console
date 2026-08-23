@@ -18,6 +18,7 @@ import {
   type SavePlanRequest,
 } from '../plan-types.js'
 import { AgentPlanCanvas, type AgentPlanCanvasCopy } from './AgentPlanCanvas.js'
+import { plannerActionReason } from './planner-errors.js'
 import css from './AgentPlanWorkbench.module.css'
 
 /** Browser actions supplied by the client entry; the component never speaks RPC directly. */
@@ -71,6 +72,14 @@ const WORKBENCH_COPY_ZH_VALUES = {
   conflictError: '方案已被其他更新改动。请刷新后重新应用本次修改。',
   planToolUnavailableError: '当前 Agent 预设没有启用方案设计工具。请在 Agent 预设中启用插件的方案工具后，用该预设新建对话。',
   conversationNotReadyError: '当前对话尚未就绪，请刷新页面后重试。',
+  capacityReachedError: '执行授权容量已满。请等待现有请求结束或过期后重试。',
+  forbiddenError: '该方案不属于当前对话。请刷新当前对话后重试。',
+  invalidRequestError: '当前方案请求无效。请检查字段后重试。',
+  notApprovedError: '该修订尚未批准。请先完成预检并批准精确修订。',
+  notFoundError: '该方案已不存在。请刷新方案列表。',
+  preflightBlockedError: '预检仍有阻塞问题。请修复后重新预检并批准。',
+  staleCapabilitiesError: '当前 Profile 的执行能力已经变化。请基于已批准内容创建新修订，保存、重新预检并批准后再执行。',
+  workflowUnavailableError: '当前 Profile 没有可用的 Workflow 执行器。请检查插件与 Profile 配置。',
   genericError: '操作失败。请刷新状态后重试。',
   noTransportProviderError: '当前 Profile 没有可用的子代理 Provider，无法创建可执行草案。请先安装并配置 Provider。',
   noDiagnostics: '没有发现问题，可以批准此修订。',
@@ -88,6 +97,8 @@ const WORKBENCH_COPY_ZH_VALUES = {
   maxAgents: '最多 Agent',
   maxConcurrent: '最大并发',
   timeoutMinutes: '超时（分钟）',
+  maxRequests: '最多请求',
+  optionalBudgetHint: '留空表示不设置。当前 Profile 不支持的预算项只能清除，预检会阻止保留这些值。',
   rolesAndProvider: '角色与 Provider',
   addRole: '添加角色',
   name: '名称',
@@ -197,6 +208,14 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   conflictError: 'This plan changed elsewhere. Refresh it, then apply your changes again.',
   planToolUnavailableError: 'Plan design is not enabled for this Agent preset. Enable the plugin plan tool in the preset, then start a new conversation with that preset.',
   conversationNotReadyError: 'This conversation is not ready yet. Refresh the page and try again.',
+  capacityReachedError: 'Execution grant capacity is full. Wait for an existing request to finish or expire, then try again.',
+  forbiddenError: 'This plan does not belong to the current conversation. Refresh the conversation and try again.',
+  invalidRequestError: 'The current plan request is invalid. Check its fields and try again.',
+  notApprovedError: 'This revision is not approved. Complete preflight and approve the exact revision first.',
+  notFoundError: 'This plan no longer exists. Refresh the plan list.',
+  preflightBlockedError: 'Preflight still has blocking issues. Resolve them, rerun preflight, and approve again.',
+  staleCapabilitiesError: 'Execution capabilities in this profile changed. Create a new revision from the approved content, save it, rerun preflight, and approve it before execution.',
+  workflowUnavailableError: 'This profile has no available Workflow executor. Check the plugin and profile configuration.',
   genericError: 'The action failed. Refresh the current state and try again.',
   noTransportProviderError: 'This profile has no available subagent Provider. Install and configure a Provider before creating an executable draft.',
   noDiagnostics: 'No issues found. This revision can be approved.',
@@ -214,6 +233,8 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   maxAgents: 'Maximum Agents',
   maxConcurrent: 'Maximum concurrency',
   timeoutMinutes: 'Timeout (minutes)',
+  maxRequests: 'Maximum requests',
+  optionalBudgetHint: 'Leave blank to omit a limit. Unsupported limits can only be cleared because preflight blocks retained values.',
   rolesAndProvider: 'Roles and Providers',
   addRole: 'Add role',
   name: 'Name',
@@ -493,6 +514,22 @@ function updateOptionalRoleField(
 }
 
 function safeActionMessage(error: unknown, copy: AgentPlanWorkbenchCopy): string {
+  const reason = plannerActionReason(error)
+  switch (reason) {
+    case 'revision-conflict': return copy.conflictError
+    case 'agent-scope-unavailable': return copy.conversationNotReadyError
+    case 'capacity-reached': return copy.capacityReachedError
+    case 'execution-tool-unavailable': return copy.planToolUnavailableError
+    case 'forbidden': return copy.forbiddenError
+    case 'invalid-request': return copy.invalidRequestError
+    case 'not-approved': return copy.notApprovedError
+    case 'not-found': return copy.notFoundError
+    case 'preflight-blocked': return copy.preflightBlockedError
+    case 'stale-capabilities': return copy.staleCapabilitiesError
+    case 'workflow-unavailable': return copy.workflowUnavailableError
+    case 'already-active': return copy.genericError
+    case undefined: break
+  }
   const message = error instanceof Error ? error.message : ''
   if (/revision conflict|expected revision|actual revision/iu.test(message)) {
     return copy.conflictError
@@ -640,6 +677,15 @@ function RootEditor({
         : task),
     })
   }
+  const setOptionalPlanBudget = (
+    field: 'maxRequests' | 'maxTokens' | 'maxCostUsd',
+    raw: string,
+  ): void => {
+    const budget = { ...content.budget }
+    if (raw.length === 0) delete budget[field]
+    else budget[field] = Number(raw)
+    update({ ...content, budget })
+  }
   return (
     <div className={css.editorBody}>
       <Field label={copy.planName}>
@@ -738,6 +784,7 @@ function RootEditor({
       </Field>
       <fieldset className={css.group}>
         <legend>{copy.overallBudget}</legend>
+        <p>{copy.optionalBudgetHint}</p>
         <div className={css.fieldGrid}>
           <Field label={copy.maxAgents}>
             <input
@@ -776,6 +823,43 @@ function RootEditor({
                 ...content,
                 budget: { ...content.budget, planTimeoutMs: numberValue(event) * 60_000 },
               }) }}
+            />
+          </Field>
+          <Field label={copy.maxRequests}>
+            <input
+              type="number"
+              min={1}
+              disabled={disabled || (
+                capabilities?.budgetSupport.requests === 'unsupported'
+                && content.budget.maxRequests === undefined
+              )}
+              value={content.budget.maxRequests ?? ''}
+              onChange={(event) => { setOptionalPlanBudget('maxRequests', event.currentTarget.value) }}
+            />
+          </Field>
+          <Field label={copy.maxTokens}>
+            <input
+              type="number"
+              min={1}
+              disabled={disabled || (
+                capabilities?.budgetSupport.tokens === 'unsupported'
+                && content.budget.maxTokens === undefined
+              )}
+              value={content.budget.maxTokens ?? ''}
+              onChange={(event) => { setOptionalPlanBudget('maxTokens', event.currentTarget.value) }}
+            />
+          </Field>
+          <Field label={copy.maxCostUsd}>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              disabled={disabled || (
+                capabilities?.budgetSupport.cost === 'unsupported'
+                && content.budget.maxCostUsd === undefined
+              )}
+              value={content.budget.maxCostUsd ?? ''}
+              onChange={(event) => { setOptionalPlanBudget('maxCostUsd', event.currentTarget.value) }}
             />
           </Field>
         </div>

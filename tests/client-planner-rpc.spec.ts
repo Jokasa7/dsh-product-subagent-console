@@ -5,7 +5,7 @@ import {
   apply,
   type ProductSubagentWorkbenchInjected,
 } from '../src/client/index.js'
-import type { AgentPlanContent } from '../src/plan-types.js'
+import { plannerRpcReasonSchema, type AgentPlanContent } from '../src/plan-types.js'
 import { SubagentWorkbenchView } from '../src/client/SubagentWorkbenchView.js'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
@@ -376,5 +376,46 @@ describe('browser planner RPC injection', () => {
       ['parent' as SessionId],
       new AbortController().signal,
     )).rejects.toThrow()
+  })
+
+  it('preserves only allowlisted planner reasons without exposing Host messages', async () => {
+    const { call, injected } = bench()
+    const signal = new AbortController().signal
+    for (const reason of plannerRpcReasonSchema.options) {
+      call.mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: 'command-error',
+          message: `[${reason}] sensitive Host detail`,
+          details: {},
+        },
+      } as never)
+
+      const known = await injected.requestPlanExecution('parent' as SessionId, {
+        parentSessionId: 'parent',
+        planId: PLAN_ID,
+        revision: 1,
+      }, signal).catch((error: unknown) => error)
+      expect(known).toBeInstanceOf(Error)
+      expect((known as Error).message).toBe(`product-subagent-console RPC failed: ${reason}`)
+      expect((known as Error).message).not.toContain('sensitive Host detail')
+    }
+
+    call.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'command-error',
+        message: '[untrusted-reason] another sensitive Host detail',
+        details: {},
+      },
+    } as never)
+    const unknown = await injected.requestPlanExecution('parent' as SessionId, {
+      parentSessionId: 'parent',
+      planId: PLAN_ID,
+      revision: 1,
+    }, signal).catch((error: unknown) => error)
+    expect(unknown).toBeInstanceOf(Error)
+    expect((unknown as Error).message).toBe('product-subagent-console RPC failed: command-error')
+    expect((unknown as Error).message).not.toContain('another sensitive Host detail')
   })
 })

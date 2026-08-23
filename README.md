@@ -6,31 +6,83 @@ English · [简体中文](README.zh.md)
 [![Release](https://img.shields.io/github/v/release/Jokasa7/dsh-product-subagent-console?include_prereleases)](https://github.com/Jokasa7/dsh-product-subagent-console/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Plan, run, and inspect multi-Agent work without leaving a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) conversation.
+See, design, and verify multi-Agent work without leaving a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) conversation.
+
+The plugin adds a **Subagents** workbench with three connected views: follow delegated work in **Runtime**, prepare an executable plan in **Plan**, and match that plan with the work that actually ran in **Compare**.
+
+It addresses three practical problems:
+
+- find running, finished, or cancellable branches without opening every child conversation;
+- review roles, dependencies, concurrency, resource conflicts, and budget limits before spending Provider time;
+- confirm that every planned task produced the expected attempt and child session after execution.
 
 > Requires DSH `0.1.1-rc.2`. This is an independent community plugin.
 >
 > Alpha preview: plans and execution history are cleared when the DSH Web process restarts.
 
-![DSH Product Subagent Console Agent plan canvas](docs/assets/agent-plan-en.jpg)
+## Three views, one workflow
 
-## Highlights
+| View | Use it for | What you can inspect |
+| --- | --- | --- |
+| **Runtime** | Following current and completed delegation | Parent-child branches, tasks, Providers, state, duration, and native child conversations |
+| **Plan** | Designing work before Agents start | Roles, tasks, dependencies, Providers, execution limits, preflight, and approved revisions |
+| **Compare** | Verifying planned work against execution | Planned tasks, actual attempts, status, timing, dependencies, and child sessions |
 
-- **Runtime** — follow native child sessions and compatible Provider runs on a draggable branch canvas.
-- **Plan** — turn a goal into editable roles, tasks, dependencies, Providers, and execution limits.
-- **Compare** — match approved plan tasks with actual executions, status, timing, and child sessions.
+## See it in action
+
+The three core views are shown below. For a screenshot-by-screenshot journey through editing, preflight, live execution, completion, and cancellation, open the [complete product tour](docs/product-tour.md).
+
+### Runtime — follow every delegated branch
+
+![Runtime showing delegated Agent branches and selected run details](docs/assets/agent-runtime-en.jpg)
+
+Runtime places native DSH child sessions and compatible Provider runs on one draggable branch canvas. Pan, zoom, rearrange cards, or select a node to inspect its task, state, duration, and Provider details. Native nodes can also open their child conversation directly.
+
+### Plan — design before execution
+
+![Editable Agent plan with roles, tasks, dependencies, and task settings](docs/assets/agent-plan-en.jpg)
+
+Enter a goal to generate a draft, or start manually. Refine roles, responsibilities, tasks, dependencies, Providers, resources, and execution limits before any child Agent starts.
+
+Save the exact revision and run preflight against the capabilities available in the current DSH profile. Resolve blocking issues, review warnings, then approve the revision you want to execute.
+
+### Compare — match the plan with actual work
+
+![Approved plan compared with recorded Agent attempts](docs/assets/agent-compare-en.jpg)
+
+Compare connects each approved plan task to the attempts and child sessions recorded for that execution. Select a task or attempt to inspect its role, status, timing, dependencies, and expected output. Active executions can also receive a cancellation request.
+
+## From goal to verified execution
+
+1. Open **Subagents → Plan**, enter a goal, and generate or create a draft.
+2. Edit the canvas and settings, save the revision, then run preflight.
+3. Resolve blocking issues, review warnings, and approve the exact revision.
+4. Open **Compare** and request execution. Follow live branches in **Runtime**, then inspect the final plan-to-execution result in **Compare**.
+
+See [Agent Planner](docs/agent-planner.md) for the complete workflow and field guide.
+
+## Good fits
+
+- **Parallel checks:** inspect frontend, backend, tests, or docs independently, then consolidate the findings.
+- **Staged delivery:** research or implement first, review or integrate later, with explicit context handoffs.
+- **Long-running work:** inspect nested delegation, duration, and state on one canvas, then open a native child conversation when needed.
+- **Execution verification:** compare an approved plan with actual attempts to spot queued, missing, cancelled, or retried branches.
 
 ## Install
 
-Download the `.tgz` file and `SHA256SUMS.txt` from the matching [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases), verify the archive, then add it to the Web profile:
+Download the `.tgz` file and `SHA256SUMS.txt` from the matching [GitHub Release](https://github.com/Jokasa7/dsh-product-subagent-console/releases), verify the archive, then install it into the profile you use:
 
 ```sh
 sha256sum --check SHA256SUMS.txt
+
+# DSH Desktop: run in Open DSH Terminal
+dsh plugin add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
+
+# Regular Web profile
 dsh plugin --profile web add ./dsh-product-subagent-console-0.4.0-alpha.2.tgz
-dsh --profile web --dump-config
 ```
 
-Restart the Web profile after installation.
+Restart DSH Desktop or the Web profile after installation.
 
 ## Enable Agent Planner
 
@@ -46,18 +98,9 @@ Add the planner tool to a copied **Agent Preset**, save it, and create a new con
 
 Preset changes apply to new conversations only. Regular delegated runs remain visible in **Runtime** even when the planner tool is not enabled.
 
-## Use
-
-1. Open **Subagents → Plan**, enter a goal, and generate or create a draft.
-2. Edit the canvas and settings, save the revision, then run preflight.
-3. Resolve blocking issues, review any warnings, and approve the revision.
-4. Open **Compare**, ask the current conversation to execute the plan, and follow each planned task against its actual run.
-
-See [Agent Planner](docs/agent-planner.md) for the complete workflow and field guide.
-
 ## Compatibility
 
-- DeepSeek Harness Web profile `0.1.1-rc.2`
+- DeepSeek Harness Web or Desktop profile `0.1.1-rc.2`
 - Node.js `^22.19.0` or `>=24.0.0`
 - At least one configured compatible subagent Provider for Plan and Compare
 - The matching Provider Bundle for each external coding Agent used by a plan or delegated task
@@ -66,6 +109,7 @@ Keep the plugin and all DSH packages on the same supported version family.
 
 ## Documentation
 
+- [Complete Product Tour](docs/product-tour.md)
 - [Getting Started](docs/getting-started.md)
 - [Agent Planner](docs/agent-planner.md)
 - [Troubleshooting](docs/troubleshooting.md)
@@ -75,10 +119,14 @@ Keep the plugin and all DSH packages on the same supported version family.
 ## Uninstall
 
 ```sh
+# DSH Desktop: run in Open DSH Terminal
+dsh plugin remove dsh-product-subagent-console
+
+# Regular Web profile
 dsh plugin --profile web remove dsh-product-subagent-console
 ```
 
-Restart the Web profile after removal.
+Restart DSH Desktop or the Web profile after removal.
 
 ## Support
 

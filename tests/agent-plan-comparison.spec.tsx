@@ -266,6 +266,47 @@ describe('Agent plan comparison controls', () => {
     expect(callbacks.requestExecution).toHaveBeenCalledOnce()
   })
 
+  it('explains how to enable the missing plan execution tool', async () => {
+    const callbacks = actions()
+    vi.mocked(callbacks.requestExecution).mockRejectedValueOnce(
+      new Error('product-subagent-console RPC failed: execution-tool-unavailable'),
+    )
+    render(createElement(AgentPlanComparison, {
+      sessionId,
+      plans: [plan()],
+      executionSnapshot: { ...snapshot(), executions: [] },
+      actions: callbacks,
+    }))
+
+    fireEvent.click(screen.getByRole('button', { name: '请求执行' }))
+
+    expect(await screen.findByText(/dsh-product-subagent-console\/plan-tool/u)).toBeTruthy()
+  })
+
+  it.each([
+    ['not-found', '该执行已不存在'],
+    ['already-active', '该修订已有执行'],
+    ['stale-capabilities', '创建新修订'],
+  ])('maps stable planner reason %s without misclassifying the action', async (reason, expected) => {
+    const callbacks = actions()
+    vi.mocked(callbacks.requestExecution).mockRejectedValueOnce(
+      new Error(`product-subagent-console RPC failed: ${reason}`),
+    )
+    render(createElement(AgentPlanComparison, {
+      sessionId,
+      plans: [plan()],
+      executionSnapshot: { ...snapshot(), executions: [] },
+      actions: callbacks,
+    }))
+
+    fireEvent.click(screen.getByRole('button', { name: '请求执行' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain(expected)
+    if (reason === 'already-active') {
+      expect(screen.queryByText(/已经结束/u)).toBeNull()
+    }
+  })
+
   it('does not mistake a historical execution for the newly queued request', async () => {
     const callbacks = actions()
     const historical = {
