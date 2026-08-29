@@ -65,6 +65,7 @@ export function findExecutionPlanRevision(
     plan.parentSessionId === execution.parentSessionId
     && plan.planId === execution.planId
     && plan.revision === execution.planRevision
+    && plan.capabilityDigest === execution.capabilityDigest
   ))
 }
 

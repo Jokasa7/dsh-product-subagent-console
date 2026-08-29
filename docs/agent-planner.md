@@ -28,7 +28,8 @@ Save the preset and create a new conversation with it.
 4. Save the draft and run preflight.
 5. Resolve blocking issues and explicitly accept any warnings you are comfortable with.
 6. Approve the revision. Approved content is locked; create a new revision when further edits are needed.
-7. Open **Compare**, select the approved plan, and request execution.
+7. Select **Review execution request**, read the impact notice, then select **Confirm and send execution request**. The request is posted visibly to the current conversation and is bound to that exact approved revision.
+8. Follow the run in **Live** and inspect its plan-to-runtime evidence in **Deviation**.
 
 ## What you can edit
 
@@ -51,11 +52,13 @@ Preflight checks the exact saved revision against the current DSH profile. It re
 
 Editing a draft invalidates its previous preflight result. Run preflight again before approval. If the DSH capability set changes after approval, the approved revision is never rewritten in place: create a new revision from its approved content, save it, rerun preflight, approve that new revision, and only then request execution.
 
-## Compare planned and actual work
+## From approval to authoritative execution
 
-The **Compare** view shows the approved plan and the attempts created for that execution. Select a plan task, attempt, or execution node to inspect its status, role, timing, dependencies, and child-session identity.
+Approval and execution are separate decisions. The execution flow issues a short-lived, single-use grant only after the second confirmation. The Host rechecks the Session, plan revision, approval state, capability digest, and preflight result before starting Workflow. A duplicate active start for the same revision is rejected.
 
-While an execution is queued or running, **Cancel execution** requests cancellation. The final state appears when DSH reports the execution as settled.
+**Deviation** shows the approved contract beside the attempts created for that execution. Select a plan task, attempt, or execution node to inspect its status, role, timing, dependencies, child-session identity, verifier receipts, and conformance findings. Use **Recovery** to preview the effect of stopping or reworking the run; whole-run cancellation uses its own two-step grant.
+
+Plan and execution snapshots are persisted with the bounded Foundry journal by default. After a restart, incomplete work is recovered as `unknown` rather than guessed as successful. See [Data and Privacy](data-and-privacy.md) for storage controls.
 
 ## Current execution support
 
@@ -66,6 +69,7 @@ While an execution is queued or running, **Cancel execution** requests cancellat
 - Output schemas are available only when the selected Provider reports support.
 - Plan-level Agent count, concurrency, and timeout are enforced. Request and token limits may be advisory; cost limits are not currently enforceable.
 - Agent Teams is not currently an executable backend.
-- Plans and execution history are held for the current DSH Web process and are cleared when that process restarts.
+- Retry and Fork are non-executing recovery proposals in v0.9, and task-level cancellation cannot be sent; only whole-run Workflow cancellation can be sent.
+- Historical Recipe evidence never bypasses current capability and permission preflight.
 
 For setup or execution errors, see [Troubleshooting](troubleshooting.md).

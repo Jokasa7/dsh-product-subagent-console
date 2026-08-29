@@ -10,10 +10,13 @@ import {
   type WorkflowResultLike,
   type WorkflowRunLike,
   type WorkflowTaskBindingEvent,
+  type WorkflowTaskTerminalEvent,
+  type WorkflowUnboundAgentEvent,
 } from '../src/workflow-adapter.js'
 import type {
   AgentPlanRevision,
   ExecutionCapabilitySnapshot,
+  PlanExecution,
   PlanPreflightResult,
 } from '../src/plan-types.js'
 
@@ -198,6 +201,15 @@ function capabilities(overrides: Partial<ExecutionCapabilitySnapshot> = {}): Exe
       tokens: 'advisory',
       cost: 'unsupported',
     },
+    contractSupport: {
+      reasoningEffort: 'unsupported',
+      verifiers: {
+        lifecycle: 'enforced',
+        schema: 'unsupported',
+        test: 'unsupported',
+        manual: 'unsupported',
+      },
+    },
     limits: { maxAgents: 32, maxConcurrent: 16 },
     experimentalAgentTeam: false,
     ...overrides,
@@ -208,21 +220,103 @@ function adapter(
   engine = new FakeEngine(),
   events = new FakeEvents(),
   onTaskBound?: (binding: WorkflowTaskBindingEvent) => void,
+  onUnboundAgent?: (event: WorkflowUnboundAgentEvent) => void,
+  onTaskTerminal?: (event: WorkflowTaskTerminalEvent) => void,
 ) {
   let uuidIndex = 0
   const instance = new WorkflowPlanExecutionAdapter({
     engine,
     events,
     ...(onTaskBound === undefined ? {} : { onTaskBound }),
+    ...(onUnboundAgent === undefined ? {} : { onUnboundAgent }),
+    ...(onTaskTerminal === undefined ? {} : { onTaskTerminal }),
     uuid: () => executionIds[uuidIndex++] ?? '00000000-0000-4000-8000-000000000199',
   })
   return { instance, engine, events }
 }
 
 describe('Workflow plan execution adapter', () => {
+  it('checkpoints a queued intent before external start and closes a thrown start as unknown', () => {
+    const order: string[] = []
+    const checkpoints: PlanExecution[] = []
+    const engine: WorkflowEngineLike<object> = {
+      start() {
+        order.push('engine-start')
+        throw new Error('engine start failed')
+      },
+    }
+    const instance = new WorkflowPlanExecutionAdapter({
+      engine,
+      uuid: () => executionIds[0]!,
+      onExecutionCheckpoint: snapshot => {
+        order.push(`checkpoint-${snapshot.status}`)
+        checkpoints.push(snapshot)
+      },
+    })
+
+    expect(() => instance.start({
+      parent: {}, plan: plan(), preflight: preflight(), capabilities: capabilities(),
+    })).toThrow('engine start failed')
+    expect(order).toEqual(['checkpoint-queued', 'engine-start', 'checkpoint-unknown'])
+    expect(checkpoints).toEqual([
+      expect.objectContaining({ status: 'queued' }),
+      expect.objectContaining({ status: 'unknown', finishedAt: expect.any(Number) }),
+    ])
+  })
+
+  it('never calls the external engine when the durable prepared checkpoint fails', () => {
+    const engine = new FakeEngine()
+    const instance = new WorkflowPlanExecutionAdapter({
+      engine,
+      uuid: () => executionIds[0]!,
+      onExecutionCheckpoint: () => { throw new Error('checkpoint unavailable') },
+    })
+    expect(() => instance.start({
+      parent: {}, plan: plan(), preflight: preflight(), capabilities: capabilities(),
+    })).toThrow('checkpoint unavailable')
+    expect(engine.request).toBeUndefined()
+  })
+
+  it('does not materialize plan slots as attempts and preserves unbound official events', async () => {
+    const onUnboundAgent = vi.fn()
+    const { instance, engine, events } = adapter(undefined, undefined, undefined, onUnboundAgent)
+    const handle = instance.start({ parent: {}, plan: plan(), preflight: preflight(), capabilities: capabilities() })
+    expect(handle.snapshot().bindings).toEqual([])
+
+    events.start(engine.run.id, { seq: 99, label: 'unrecognized', childId: 'child-unbound' })
+    events.end(engine.run.id, {
+      seq: 99,
+      label: 'unrecognized',
+      childId: 'child-unbound',
+      outcome: 'failed',
+    })
+    expect(onUnboundAgent).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      executionId: handle.executionId,
+      phase: 'start',
+      childId: 'child-unbound',
+    }))
+    expect(onUnboundAgent).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      executionId: handle.executionId,
+      phase: 'end',
+      outcome: 'failed',
+    }))
+    expect(handle.snapshot().bindings).toEqual([])
+
+    engine.run.deferred.resolve({ value: null, stopReason: 'error', agentsStarted: 0 })
+    await handle.result
+    await instance.dispose()
+  })
+
   it('passes a fixed script and one transport while keeping plan data in args', async () => {
     const onTaskBound = vi.fn()
-    const { instance, engine, events } = adapter(undefined, undefined, onTaskBound)
+    const onTaskTerminal = vi.fn()
+    const { instance, engine, events } = adapter(
+      undefined,
+      undefined,
+      onTaskBound,
+      undefined,
+      onTaskTerminal,
+    )
     const candidate = plan()
     const handle = instance.start({
       parent: {},
@@ -269,6 +363,17 @@ describe('Workflow plan execution adapter', () => {
       childId: 'child-api',
       outcome: 'completed',
     })
+    expect(onTaskTerminal).toHaveBeenCalledWith({
+      executionId: handle.executionId,
+      parentSessionId: 'parent-session',
+      taskId: 'api',
+      taskTitle: 'Review API',
+      attemptId: expect.any(String),
+      childId: 'child-api',
+      workflowSeq: 1,
+      observedAt: expect.any(Number),
+      outcome: 'completed',
+    })
     engine.run.deferred.resolve({
       value: {
         schemaVersion: 1,
@@ -299,8 +404,11 @@ describe('Workflow plan execution adapter', () => {
     const { instance, engine } = adapter()
     const handle = instance.start({ parent: {}, plan: plan(), preflight: preflight(), capabilities: capabilities() })
     handle.cancel('user stopped the plan')
+    handle.cancel('duplicate cancellation')
     expect(handle.snapshot()).toMatchObject({ status: 'stopping', cancellationRequested: true })
     expect(engine.run.cancelReasons).toContain('user stopped the plan')
+    expect(engine.run.cancelReasons).not.toContain('duplicate cancellation')
+    expect(instance.cancel(plan().parentSessionId, handle.executionId, 'duplicate adapter cancellation')).toBe(false)
     engine.run.deferred.resolve({
       value: null,
       stopReason: 'cancelled',
@@ -309,7 +417,7 @@ describe('Workflow plan execution adapter', () => {
     })
     await expect(handle.result).resolves.toMatchObject({
       status: 'cancelled',
-      bindings: expect.arrayContaining([expect.objectContaining({ status: 'cancelled' })]),
+      bindings: [],
     })
     await handle.dispose()
     await handle.dispose()
@@ -357,7 +465,7 @@ describe('Workflow plan execution adapter', () => {
       expect(handle.snapshot()).toMatchObject({
         status: 'unknown',
         cancellationRequested: true,
-        bindings: expect.arrayContaining([expect.objectContaining({ status: 'unknown' })]),
+        bindings: [],
       })
       await vi.advanceTimersByTimeAsync(7)
       const terminal = await handle.result
@@ -517,7 +625,6 @@ describe('Workflow plan execution adapter', () => {
     expect(result.bindings.map(binding => [binding.taskId, binding.status])).toEqual([
       ['api', 'completed'],
       ['ui', 'failed'],
-      ['synthesis', 'skipped'],
     ])
     expect(JSON.stringify(result)).not.toContain('must not enter PlanExecution')
     await instance.dispose()
@@ -532,6 +639,38 @@ describe('Workflow plan execution adapter', () => {
       agentsStarted: 1,
     })
     await expect(handle.result).resolves.toMatchObject({ status: 'unknown' })
+    await instance.dispose()
+  })
+
+  it.each([
+    {
+      name: 'completed tasks without started Agents',
+      tasks: [
+        { taskId: 'api', status: 'completed' as const },
+        { taskId: 'ui', status: 'completed' as const },
+        { taskId: 'synthesis', status: 'completed' as const },
+      ],
+      agentsStarted: 0,
+    },
+    {
+      name: 'skipped task with a mismatched started-Agent count',
+      tasks: [
+        { taskId: 'api', status: 'completed' as const },
+        { taskId: 'ui', status: 'failed' as const },
+        { taskId: 'synthesis', status: 'skipped' as const },
+      ],
+      agentsStarted: 1,
+    },
+  ])('marks $name as unknown', async ({ tasks, agentsStarted }) => {
+    const { instance, engine } = adapter()
+    const handle = instance.start({ parent: {}, plan: plan(), preflight: preflight(), capabilities: capabilities() })
+    engine.run.deferred.resolve({
+      value: { schemaVersion: 1, tasks },
+      stopReason: 'completed',
+      agentsStarted,
+    })
+
+    await expect(handle.result).resolves.toMatchObject({ status: 'unknown', bindings: [] })
     await instance.dispose()
   })
 

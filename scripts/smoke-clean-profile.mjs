@@ -180,7 +180,7 @@ async function validateSuppliedPackage(path) {
   )
   assert.match(
     basename(archive),
-    /^dsh-product-subagent-console-[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.-]+\.tgz$/u,
+    /^dsh-product-subagent-console-[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?\.tgz$/u,
     'the supplied smoke package has an unexpected filename',
   )
   return archive

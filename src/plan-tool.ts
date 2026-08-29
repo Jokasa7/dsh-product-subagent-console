@@ -12,11 +12,14 @@ export interface Config {
   toolName?: string
   /** Model-visible approved-plan execution tool name. Default: `execute_subagent_plan`. */
   executeToolName?: string
+  /** Read-only factual run inspection tool name. Default: `inspect_agent_run`. */
+  inspectToolName?: string
 }
 
 export const Config: schema<Config> = schema.object({
   toolName: schema.string().default('design_subagent_plan'),
   executeToolName: schema.string().default('execute_subagent_plan'),
+  inspectToolName: schema.string().default('inspect_agent_run'),
 })
 
 const identifierDescription = 'Stable kebab-case identifier unique within this plan.'
@@ -135,6 +138,11 @@ const agentPlanParameterSpec = {
             type: 'string',
             description: 'Optional model wish. Omit unless the selected backend can enforce it.',
           },
+          reasoningEffort: {
+            type: 'string',
+            enum: ['low', 'medium', 'high', 'xhigh', 'max', 'unknown'],
+            description: 'Optional reasoning effort request. Omit unless the backend can enforce it; use unknown only when documenting an unavailable observation.',
+          },
           agentPreset: {
             type: 'string',
             description: 'Optional Agent preset wish. Omit unless the selected backend can enforce it.',
@@ -233,6 +241,34 @@ const agentPlanParameterSpec = {
               maxCostUsd: { type: 'number' },
             },
           },
+          effect: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Side-effect contract used to fail closed during recovery previews. Omit only when unknown is accurate.',
+            properties: {
+              kind: {
+                type: 'string',
+                required: true,
+                enum: ['pure', 'idempotent', 'compensatable', 'irreversible', 'unknown'],
+              },
+              idempotencyScope: { type: 'string' },
+              compensationRef: { type: 'string' },
+            },
+          },
+          verifiers: {
+            type: 'array',
+            description: 'Independent checks required before this task can be called verified.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                verifierId: { type: 'string', required: true, description: identifierDescription },
+                kind: { type: 'string', required: true, enum: ['lifecycle', 'schema', 'test', 'manual'] },
+                description: { type: 'string', required: true },
+                required: { type: 'boolean', required: true, default: true },
+              },
+            },
+          },
         },
       },
     },
@@ -243,7 +279,10 @@ const agentPlanParameterSpec = {
 export function apply(ctx: Context, config: Config = {}): void {
   const toolName = config.toolName ?? 'design_subagent_plan'
   const executeToolName = config.executeToolName ?? 'execute_subagent_plan'
-  if (toolName === executeToolName) throw new Error('Agent plan design and execution tool names must be unique')
+  const inspectToolName = config.inspectToolName ?? 'inspect_agent_run'
+  if (new Set([toolName, executeToolName, inspectToolName]).size !== 3) {
+    throw new Error('Agent plan design, execution, and inspection tool names must be unique')
+  }
   ctx.effect(
     () => ctx.productSubagentConsole.registerPlannerToolNames(toolName, executeToolName),
     'dsh-product-subagent-console: planner tool names',
@@ -316,7 +355,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         expectedRevision,
         content,
         ...(args.plan_id === undefined ? {} : { planId: args.plan_id }),
-      })
+      }, 'model-claim')
       return {
         planId: saved.planId,
         revision: saved.revision,
@@ -350,7 +389,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       grant_id: {
         type: 'string',
         required: true,
-        description: 'The short-lived one-time execution grant created by the user action in Compare.',
+        description: 'The short-lived one-time execution grant created by the user action in Subagents > Plan.',
       },
     },
     output: {
@@ -374,7 +413,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           `Agent plan execution ${value.executionId} ended as ${value.status}: `
           + `${String(value.completed)} completed, ${String(value.failed)} failed, `
           + `${String(value.skipped)} skipped, ${String(value.unknown)} unknown. `
-          + 'Open Subagents > Compare to inspect the factual bindings.',
+          + 'Open Subagents > Deviation or Recovery to inspect factual bindings, evidence, and recovery impact.',
       }],
     },
     presentCall: args => ({
@@ -411,6 +450,119 @@ export function apply(ctx: Context, config: Config = {}): void {
         skipped,
         unknown,
       }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: inspectToolName,
+    description:
+      'Inspect one recorded Agent-plan execution using only privacy-safe Foundry facts. Use it to explain '
+      + 'lifecycle, first provable divergence, active tasks, configuration, evidence, cancellation impact, '
+      + 'or recovery impact. It never resumes, retries, cancels, or edits an Agent. Distinguish returned '
+      + 'facts from hypotheses and cite factId, findingIds, or evidenceEventIds in the answer.',
+    parameters: {
+      run_id: {
+        type: 'string',
+        required: true,
+        description: 'Execution ID shown in Subagents > Live or Deviation.',
+      },
+      query: {
+        type: 'string',
+        required: true,
+        enum: [
+          'summary',
+          'why-running',
+          'first-divergence',
+          'active-tasks',
+          'configuration',
+          'cancel-impact',
+          'recovery-impact',
+          'evidence',
+        ],
+      },
+      task_id: { type: 'string', description: 'Optional exact task ID filter.' },
+      through_cursor: {
+        type: 'integer',
+        description: 'Optional event cursor for a historical point-in-time question.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          queryId: { type: 'string', required: true },
+          runId: { type: 'string', required: true },
+          query: { type: 'string', required: true },
+          answerCode: { type: 'string', required: true },
+          state: { type: 'string', required: true },
+          throughCursor: { type: 'integer', required: true },
+          facts: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                factId: { type: 'string', required: true },
+                category: { type: 'string', required: true },
+                label: { type: 'string', required: true },
+                value: { type: 'string', required: true },
+                certainty: { type: 'string', required: true },
+                taskId: { type: 'string' },
+                attemptId: { type: 'string' },
+                evidenceEventIds: { type: 'array', required: true, items: { type: 'string' } },
+                findingIds: { type: 'array', required: true, items: { type: 'string' } },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.facts.length === 0
+          ? `No sufficient factual evidence is available for ${value.query} on run ${value.runId}.`
+          : value.facts.map(fact => (
+            `[${fact.certainty}] ${fact.label}: ${fact.value} (fact ${fact.factId})`
+          )).join('\n'),
+      }],
+    },
+    presentCall: args => ({
+      card: 'generic',
+      title: 'Inspect Agent run',
+      kind: 'other',
+      rawInput: `${args.query} · ${args.run_id}`,
+    }),
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const parent = exec.agent
+      if (parent === undefined) throw new Error('Agent run inspection requires a calling Agent')
+      const result = ctx.productSubagentConsole.inspectRun({
+        parentSessionId: String(parent.id),
+        runId: args.run_id,
+        kind: args.query,
+        ...(args.task_id === undefined ? {} : { taskId: args.task_id }),
+        ...(args.through_cursor === undefined ? {} : { throughCursor: args.through_cursor }),
+      })
+      return await Promise.resolve({
+        queryId: result.queryId,
+        runId: result.runId,
+        query: result.kind,
+        answerCode: result.answerCode,
+        state: result.state,
+        throughCursor: result.throughCursor,
+        facts: result.facts.map(fact => ({
+          factId: fact.factId,
+          category: fact.category,
+          label: fact.label,
+          value: fact.value,
+          certainty: fact.certainty,
+          evidenceEventIds: fact.evidenceEventIds,
+          findingIds: fact.findingIds,
+          ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
+          ...(fact.attemptId === undefined ? {} : { attemptId: fact.attemptId }),
+        })),
+      })
     },
   }))
 }

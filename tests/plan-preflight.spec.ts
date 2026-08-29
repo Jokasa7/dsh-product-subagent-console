@@ -40,6 +40,15 @@ function capabilities(overrides: Partial<ExecutionCapabilitySnapshot> = {}): Exe
       tokens: 'advisory',
       cost: 'unsupported',
     },
+    contractSupport: {
+      reasoningEffort: 'unsupported',
+      verifiers: {
+        lifecycle: 'enforced',
+        schema: 'unsupported',
+        test: 'unsupported',
+        manual: 'unsupported',
+      },
+    },
     limits: { maxAgents: 32, maxConcurrent: 16 },
     experimentalAgentTeam: false,
     catalogDigest: 'catalog-v1',
@@ -201,6 +210,30 @@ describe('Agent plan preflight', () => {
       'backend.workflow-model-routing-unsupported',
       'backend.workflow-preset-unsupported',
       'backend.workflow-tool-policy-unsupported',
+    ]))
+  })
+
+  it('blocks requested reasoning effort and verifiers that the adapter cannot enforce', () => {
+    const candidate = plan([{
+      ...task('a'),
+      verifiers: [{
+        verifierId: 'schema-check',
+        kind: 'schema',
+        description: 'Validate the structured result.',
+        required: true,
+      }],
+    }])
+    candidate.roles[0] = {
+      ...candidate.roles[0]!,
+      reasoningEffort: 'high',
+    }
+
+    const result = preflightAgentPlan(candidate, capabilities())
+
+    expect(result.valid).toBe(false)
+    expect(result.diagnostics.map(item => item.code)).toEqual(expect.arrayContaining([
+      'role.reasoning-effort-unsupported',
+      'task.verifier-schema-unsupported',
     ]))
   })
 

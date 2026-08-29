@@ -127,6 +127,48 @@ function activeSnapshot(): ConsoleSnapshot {
 }
 
 describe('workbench disconnected rendering', () => {
+  it('replaces raw structured native prompts with an honest localized label', async () => {
+    const state = sessionState()
+    const nativeEntry = state.subagentsByParent[parent]!.entries[0]
+    if (nativeEntry?.kind !== 'child') throw new Error('native child fixture missing')
+    state.subagentsByParent[parent]!.entries[0] = {
+      ...nativeEntry,
+      label: '{"taskExecutionRules":["Execute only the bounded task"]}',
+    }
+    const view = render(createElement(SubagentWorkbenchView, {
+      sessionId: parent,
+      t,
+      useSessions: selector => selector(state),
+      listSessions: vi.fn(async () => ({ ...activeSnapshot(), runs: [] })),
+      openChild: vi.fn(),
+      refreshNative: vi.fn(async () => {}),
+    } as SubagentWorkbenchProps))
+
+    expect(await screen.findByText('Structured subagent task')).toBeTruthy()
+    expect(view.container.textContent).not.toContain('taskExecutionRules')
+  })
+
+  it('keeps a factual native task title while removing its structured prompt suffix', async () => {
+    const state = sessionState()
+    const nativeEntry = state.subagentsByParent[parent]!.entries[0]
+    if (nativeEntry?.kind !== 'child') throw new Error('native child fixture missing')
+    state.subagentsByParent[parent]!.entries[0] = {
+      ...nativeEntry,
+      label: 'Task: Read README {"taskExec',
+    }
+    const view = render(createElement(SubagentWorkbenchView, {
+      sessionId: parent,
+      t,
+      useSessions: selector => selector(state),
+      listSessions: vi.fn(async () => ({ ...activeSnapshot(), runs: [] })),
+      openChild: vi.fn(),
+      refreshNative: vi.fn(async () => {}),
+    } as SubagentWorkbenchProps))
+
+    expect(await screen.findByText('Task: Read README')).toBeTruthy()
+    expect(view.container.textContent).not.toContain('taskExecutionRules')
+  })
+
   it('freezes stale plugin activity while keeping native activity factual', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(10_000)

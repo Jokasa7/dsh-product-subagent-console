@@ -10,6 +10,7 @@ import {
   type ApprovePlanRequest,
   type ExecutionCapabilitySnapshot,
   type PlanDiagnostic,
+  type PlanExecutionGrant,
   type PlanPreflightResult,
   type PlanRepositorySnapshot,
   type PlanRevisionRequest,
@@ -52,6 +53,12 @@ export interface AgentPlanWorkbenchInjected {
     objective: string,
     signal: AbortSignal,
   ) => Promise<void>
+  /** Queue a visible request to execute one exact approved revision. */
+  readonly requestPlanExecution: (
+    parentSessionId: SessionId,
+    request: PlanRevisionRequest,
+    signal: AbortSignal,
+  ) => Promise<PlanExecutionGrant>
 }
 
 const WORKBENCH_COPY_ZH_VALUES = {
@@ -153,6 +160,7 @@ const WORKBENCH_COPY_ZH_VALUES = {
   unsavedDraft: '未保存草案',
   notSelected: '未选择',
   temporaryStorage: '临时保存，仅在本次运行中保留',
+  durableStorage: '由本地 Foundry 日志持久保存',
   refresh: '刷新',
   addTask: '添加任务',
   disconnected: '与方案服务的连接已中断；当前内容可能不是最新状态。',
@@ -174,6 +182,11 @@ const WORKBENCH_COPY_ZH_VALUES = {
   runPreflight: '运行预检',
   approving: '正在批准…',
   approveRevision: '批准此修订',
+  reviewExecution: '检查执行请求',
+  confirmExecution: '确认并发送执行请求',
+  executionWarning: '下一步会签发一次性授权，并在当前对话中发送一条可见消息来执行这个精确修订。',
+  executionRequested: '执行请求已发送到当前对话；可在“实时运行”中观察子 Agent。',
+  executionPending: '执行请求已发送',
   preflightEmpty: '保存后运行预检，系统会检查依赖、能力、Provider、工具与预算。',
   canApprove: '可以批准',
   blockingIssues: '存在阻塞问题',
@@ -289,6 +302,7 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   unsavedDraft: 'Unsaved draft',
   notSelected: 'Not selected',
   temporaryStorage: 'Saved temporarily for this run only',
+  durableStorage: 'Persisted in the local Foundry journal',
   refresh: 'Refresh',
   addTask: 'Add task',
   disconnected: 'The plan service is disconnected. The current content may be stale.',
@@ -310,6 +324,11 @@ export const AGENT_PLAN_WORKBENCH_COPY_EN: AgentPlanWorkbenchCopy = {
   runPreflight: 'Run preflight',
   approving: 'Approving…',
   approveRevision: 'Approve revision',
+  reviewExecution: 'Review execution request',
+  confirmExecution: 'Confirm and send execution request',
+  executionWarning: 'The next step issues a one-time grant and sends a visible message in this conversation to execute this exact revision.',
+  executionRequested: 'The execution request was sent to this conversation. Observe child Agents in Live.',
+  executionPending: 'Execution request sent',
   preflightEmpty: 'Save and run preflight to check dependencies, capabilities, Providers, tools, and budgets.',
   canApprove: 'Ready to approve',
   blockingIssues: 'Blocking issues found',
@@ -342,7 +361,13 @@ type LoadState = {
   readonly snapshot?: PlanRepositorySnapshot
 }
 
-type ActionName = 'generate' | 'manual' | 'save' | 'preflight' | 'approve' | 'new-revision' | null
+type ActionName = 'generate' | 'manual' | 'save' | 'preflight' | 'approve' | 'execute' | 'new-revision' | null
+
+type ExecutionConfirmation = {
+  readonly parentSessionId: string
+  readonly planId: string
+  readonly revision: number
+}
 
 function contentFromRevision(revision: AgentPlanRevision): AgentPlanContent {
   return {
@@ -556,13 +581,14 @@ function numberValue(event: ChangeEvent<HTMLInputElement>): number {
 }
 
 function DiagnosticList({
-  diagnostics, accepted, onAccepted, onSelect, copy,
+  diagnostics, accepted, onAccepted, onSelect, copy, disabled,
 }: {
   readonly diagnostics: readonly PlanDiagnostic[]
   readonly accepted: ReadonlySet<string>
   readonly onAccepted: (diagnosticId: string, value: boolean) => void
   readonly onSelect: (taskId: string) => void
   readonly copy: AgentPlanWorkbenchCopy
+  readonly disabled: boolean
 }): ReactNode {
   if (diagnostics.length === 0) {
     return <p className={css.diagnosticEmpty}>{copy.noDiagnostics}</p>
@@ -580,7 +606,7 @@ function DiagnosticList({
           {diagnostic.nodeIds.length === 0 ? null : (
             <div className={css.diagnosticNodes}>
               {diagnostic.nodeIds.map(nodeId => (
-                <button key={nodeId} type="button" onClick={() => { onSelect(nodeId) }}>{nodeId}</button>
+                <button key={nodeId} type="button" disabled={disabled} onClick={() => { onSelect(nodeId) }}>{nodeId}</button>
               ))}
             </div>
           )}
@@ -588,6 +614,7 @@ function DiagnosticList({
             <label className={css.acceptWarning}>
               <input
                 type="checkbox"
+                disabled={disabled}
                 checked={accepted.has(diagnostic.diagnosticId)}
                 onChange={(event) => { onAccepted(diagnostic.diagnosticId, event.currentTarget.checked) }}
               />
@@ -1242,6 +1269,8 @@ export function AgentPlanWorkbench({
   const [action, setAction] = useState<ActionName>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [executionConfirmation, setExecutionConfirmation] = useState<ExecutionConfirmation | null>(null)
+  const [executionPromptPending, setExecutionPromptPending] = useState(false)
   const actionController = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -1279,6 +1308,29 @@ export function AgentPlanWorkbench({
   useEffect(() => () => { actionController.current?.abort() }, [])
 
   useEffect(() => {
+    if (active) return
+    actionController.current?.abort()
+    actionController.current = null
+    setAction(null)
+    setExecutionConfirmation(null)
+    setExecutionPromptPending(false)
+  }, [active])
+
+  useEffect(() => {
+    actionController.current?.abort()
+    actionController.current = null
+    setAction(null)
+    setExecutionConfirmation(null)
+    setExecutionPromptPending(false)
+  }, [editor?.planId, editor?.revision, sessionId])
+
+  useEffect(() => {
+    if (!executionPromptPending) return
+    const timer = setTimeout(() => { setExecutionPromptPending(false) }, 120_000)
+    return () => { clearTimeout(timer) }
+  }, [executionPromptPending])
+
+  useEffect(() => {
     if (!active) return
     const controller = new AbortController()
     void injected.getExecutionCapabilities(sessionId, controller.signal)
@@ -1304,33 +1356,48 @@ export function AgentPlanWorkbench({
   }, [editor?.dirty, editor?.planId, plans, selectedPlanId])
 
   const editable = editor !== null && editor.state === 'draft'
+  const networkReady = active && load.status === 'ready'
   const selectedTask = selection === 'root'
     ? undefined
     : editor?.content.tasks.find(task => task.taskId === selection)
   const warnings = warningIds(preflight)
   const warningsAccepted = warnings.every(diagnosticId => acceptedWarnings.has(diagnosticId))
   const canApprove = editor?.planId !== undefined
+    && networkReady
     && editor.state === 'draft'
     && !editor.dirty
     && preflight?.valid === true
     && preflight.planId === editor.planId
     && preflight.revision === editor.revision
     && warningsAccepted
+  const executionTarget: ExecutionConfirmation | undefined = editor?.planId !== undefined
+    && editor.state === 'approved'
+    ? { parentSessionId: String(sessionId), planId: editor.planId, revision: editor.revision }
+    : undefined
+  const executeArmed = executionTarget !== undefined
+    && executionConfirmation?.parentSessionId === executionTarget.parentSessionId
+    && executionConfirmation.planId === executionTarget.planId
+    && executionConfirmation.revision === executionTarget.revision
 
-  const beginAction = (name: Exclude<ActionName, null>): AbortSignal => {
+  const beginAction = (name: Exclude<ActionName, null>): AbortController => {
     actionController.current?.abort()
     const controller = new AbortController()
     actionController.current = controller
     setAction(name)
     setActionError(null)
     setMessage(null)
-    return controller.signal
+    return controller
   }
 
-  const finishAction = (): void => {
+  const finishAction = (owner: AbortController): void => {
+    if (actionController.current !== owner) return
     setAction(null)
     actionController.current = null
   }
+
+  const ownsAction = (owner: AbortController): boolean => (
+    !owner.signal.aborted && actionController.current === owner
+  )
 
   const updateContent = (content: AgentPlanContent): void => {
     setEditor(previous => previous === null ? null : { ...previous, content, dirty: true })
@@ -1348,73 +1415,83 @@ export function AgentPlanWorkbench({
   }
 
   const requestDesign = async (): Promise<void> => {
+    if (!networkReady) return
     if (objective.trim().length === 0) {
       setActionError(copy.objectiveRequired)
       return
     }
-    const signal = beginAction('generate')
+    const request = beginAction('generate')
     try {
-      await injected.requestPlanDesign(sessionId, objective.trim(), signal)
+      await injected.requestPlanDesign(sessionId, objective.trim(), request.signal)
+      if (!ownsAction(request)) return
       setMessage(copy.designRequested)
     } catch (error: unknown) {
-      const safe = safeActionMessage(error, copy)
-      if (safe.length > 0) setActionError(safe)
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
     } finally {
-      finishAction()
+      finishAction(request)
     }
   }
 
   const save = async (): Promise<void> => {
-    if (editor === null) return
+    if (editor === null || !networkReady) return
     const parsed = agentPlanContentSchema.safeParse(normalizedContent(editor.content))
     if (!parsed.success) {
       setActionError(copy.invalidPlan)
       return
     }
-    const signal = beginAction('save')
+    const request = beginAction('save')
     try {
       const saved = await injected.savePlan({
         parentSessionId: String(sessionId),
         ...(editor.planId === undefined ? {} : { planId: editor.planId }),
         expectedRevision: editor.revision,
         content: parsed.data,
-      }, signal)
+      }, request.signal)
+      if (!ownsAction(request)) return
       setSelectedPlanId(saved.planId)
       setEditor(editorFromRevision(saved))
       setPreflight(null)
       setAcceptedWarnings(new Set())
       setMessage(formatCopy(copy.savedRevision, { revision: saved.revision }))
     } catch (error: unknown) {
-      const safe = safeActionMessage(error, copy)
-      if (safe.length > 0) setActionError(safe)
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
     } finally {
-      finishAction()
+      finishAction(request)
     }
   }
 
   const runPreflight = async (): Promise<void> => {
-    if (editor?.planId === undefined || editor.dirty) return
-    const signal = beginAction('preflight')
+    if (editor?.planId === undefined || editor.dirty || !networkReady) return
+    const request = beginAction('preflight')
     try {
       const result = await injected.preflightPlan({
         parentSessionId: String(sessionId),
         planId: editor.planId,
         revision: editor.revision,
-      }, signal)
+      }, request.signal)
+      if (!ownsAction(request)) return
       setPreflight(result)
       setAcceptedWarnings(new Set())
       setMessage(result.valid ? copy.preflightComplete : copy.preflightBlocked)
     } catch (error: unknown) {
-      const safe = safeActionMessage(error, copy)
-      if (safe.length > 0) setActionError(safe)
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
     } finally {
-      finishAction()
+      finishAction(request)
     }
   }
 
   const approve = async (): Promise<void> => {
     if (!canApprove || editor?.planId === undefined || preflight === null) return
-    const signal = beginAction('approve')
+    const request = beginAction('approve')
     try {
       const approved = await injected.approvePlan({
         parentSessionId: String(sessionId),
@@ -1422,36 +1499,71 @@ export function AgentPlanWorkbench({
         revision: editor.revision,
         capabilityDigest: preflight.capabilityDigest,
         acceptedWarningIds: [...acceptedWarnings],
-      }, signal)
+      }, request.signal)
+      if (!ownsAction(request)) return
       setEditor(editorFromRevision(approved))
       setMessage(formatCopy(copy.approvedRevision, { revision: approved.revision }))
     } catch (error: unknown) {
-      const safe = safeActionMessage(error, copy)
-      if (safe.length > 0) setActionError(safe)
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
     } finally {
-      finishAction()
+      finishAction(request)
     }
   }
 
   const createNewRevision = async (): Promise<void> => {
-    if (editor?.planId === undefined || editor.state !== 'approved') return
-    const signal = beginAction('new-revision')
+    if (editor?.planId === undefined || editor.state !== 'approved' || !networkReady) return
+    const request = beginAction('new-revision')
     try {
       const saved = await injected.savePlan({
         parentSessionId: String(sessionId),
         planId: editor.planId,
         expectedRevision: editor.revision,
         content: editor.content,
-      }, signal)
+      }, request.signal)
+      if (!ownsAction(request)) return
       setEditor(editorFromRevision(saved))
       setPreflight(null)
       setAcceptedWarnings(new Set())
       setMessage(formatCopy(copy.createdRevision, { revision: saved.revision }))
     } catch (error: unknown) {
-      const safe = safeActionMessage(error, copy)
-      if (safe.length > 0) setActionError(safe)
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
     } finally {
-      finishAction()
+      finishAction(request)
+    }
+  }
+
+  const requestExecution = async (): Promise<void> => {
+    if (executionTarget === undefined || !networkReady) return
+    if (!executeArmed) {
+      setExecutionConfirmation(executionTarget)
+      setActionError(null)
+      setMessage(null)
+      return
+    }
+    const request = beginAction('execute')
+    try {
+      await injected.requestPlanExecution(sessionId, {
+        parentSessionId: executionTarget.parentSessionId,
+        planId: executionTarget.planId,
+        revision: executionTarget.revision,
+      }, request.signal)
+      if (!ownsAction(request)) return
+      setExecutionConfirmation(null)
+      setExecutionPromptPending(true)
+      setMessage(copy.executionRequested)
+    } catch (error: unknown) {
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
+    } finally {
+      finishAction(request)
     }
   }
 
@@ -1491,9 +1603,11 @@ export function AgentPlanWorkbench({
   }
 
   const startManual = async (): Promise<void> => {
-    const signal = beginAction('manual')
+    if (!networkReady) return
+    const request = beginAction('manual')
     try {
-      const snapshot = capabilities ?? await injected.getExecutionCapabilities(sessionId, signal)
+      const snapshot = capabilities ?? await injected.getExecutionCapabilities(sessionId, request.signal)
+      if (!ownsAction(request)) return
       setCapabilities(snapshot)
       const transport = preferredTransport(snapshot)
       if (transport === undefined) {
@@ -1512,10 +1626,12 @@ export function AgentPlanWorkbench({
       setAcceptedWarnings(new Set())
       setMessage(null)
     } catch (error: unknown) {
-      const safe = safeActionMessage(error, copy)
-      if (safe.length > 0) setActionError(safe)
+      if (ownsAction(request)) {
+        const safe = safeActionMessage(error, copy)
+        if (safe.length > 0) setActionError(safe)
+      }
     } finally {
-      finishAction()
+      finishAction(request)
     }
   }
 
@@ -1540,17 +1656,18 @@ export function AgentPlanWorkbench({
         <textarea
           aria-label={copy.objective}
           rows={2}
+          disabled={!active || action !== null}
           placeholder={copy.generatorPlaceholder}
           value={objective}
           onChange={(event) => { setObjective(event.currentTarget.value) }}
         />
         <div className={css.generatorActions}>
-          <button type="button" disabled={action !== null} onClick={() => { void requestDesign() }}>
+          <button type="button" disabled={!networkReady || action !== null} onClick={() => { void requestDesign() }}>
             {action === 'generate' ? copy.sending : copy.generatePlan}
           </button>
           <button
             type="button"
-            disabled={action !== null || editor?.dirty === true}
+            disabled={!networkReady || action !== null || editor?.dirty === true}
             onClick={() => { void startManual() }}
           >
             {action === 'manual' ? copy.loadingProviders : copy.createManually}
@@ -1563,7 +1680,7 @@ export function AgentPlanWorkbench({
           <span>{copy.currentPlan}</span>
           <select
             value={selectedPlanId ?? ''}
-            disabled={plans.length === 0 || editor?.dirty === true || action !== null}
+            disabled={!networkReady || plans.length === 0 || editor?.dirty === true || action !== null}
             onChange={(event) => {
               const next = plans.find(plan => plan.planId === event.currentTarget.value)
               if (next === undefined) return
@@ -1590,18 +1707,18 @@ export function AgentPlanWorkbench({
             : editor.planId === undefined
               ? copy.unsavedDraft
               : `r${String(editor.revision)} · ${revisionStateLabel(editor.state, copy)}`}</span>
-          <span>{copy.temporaryStorage}</span>
+          <span>{load.snapshot?.durability === 'disk' ? copy.durableStorage : copy.temporaryStorage}</span>
         </div>
         <div className={css.toolbarActions}>
-          <button type="button" disabled={editor?.dirty === true || action !== null} onClick={refresh}>{copy.refresh}</button>
-          <button type="button" disabled={!editable || action !== null} onClick={addTask}>{copy.addTask}</button>
+          <button type="button" disabled={!active || editor?.dirty === true || action !== null} onClick={refresh}>{copy.refresh}</button>
+          <button type="button" disabled={!active || !editable || action !== null} onClick={addTask}>{copy.addTask}</button>
         </div>
       </div>
 
       {load.status === 'error' ? (
         <div className={css.failure} role="alert">
           <span>{copy.disconnected}</span>
-          <button type="button" disabled={editor?.dirty === true} onClick={refresh}>{copy.retry}</button>
+          <button type="button" disabled={!active || editor?.dirty === true} onClick={refresh}>{copy.retry}</button>
         </div>
       ) : null}
       {actionError === null ? null : <div className={css.failure} role="alert">{actionError}</div>}
@@ -1636,7 +1753,7 @@ export function AgentPlanWorkbench({
             {selection === 'root' || selectedTask === undefined
               ? <RootEditor
                 content={editor.content}
-                disabled={!editable}
+                disabled={!active || !editable || action !== null}
                 update={updateContent}
                 copy={copy}
                 {...(capabilities === undefined ? {} : { capabilities })}
@@ -1644,7 +1761,7 @@ export function AgentPlanWorkbench({
               : <TaskEditor
                 content={editor.content}
                 task={selectedTask}
-                disabled={!editable}
+                disabled={!active || !editable || action !== null}
                 update={(task) => { updateContent({
                   ...editor.content,
                   tasks: editor.content.tasks.map(item => item.taskId === task.taskId ? task : item),
@@ -1666,26 +1783,34 @@ export function AgentPlanWorkbench({
             </div>
             <div className={css.reviewActions}>
               {editor.state === 'approved' ? (
-                <button
-                  type="button"
-                  disabled={action !== null}
-                  onClick={() => { void createNewRevision() }}
-                >{action === 'new-revision' ? copy.creatingRevision : copy.createRevision}</button>
+                <>
+                  <button
+                    type="button"
+                    disabled={!networkReady || action !== null}
+                    onClick={() => { void createNewRevision() }}
+                  >{action === 'new-revision' ? copy.creatingRevision : copy.createRevision}</button>
+                  <button
+                    type="button"
+                    className={css.primaryButton}
+                    disabled={!networkReady || action !== null || executionPromptPending}
+                    onClick={() => { void requestExecution() }}
+                  >{executionPromptPending ? copy.executionPending : executeArmed ? copy.confirmExecution : copy.reviewExecution}</button>
+                </>
               ) : (
                 <>
                   <button
                     type="button"
-                    disabled={!editor.dirty || action !== null}
+                    disabled={!active || !editor.dirty || action !== null}
                     onClick={discardChanges}
                   >{copy.discardChanges}</button>
                   <button
                     type="button"
-                    disabled={!editor.dirty || action !== null}
+                    disabled={!networkReady || !editor.dirty || action !== null}
                     onClick={() => { void save() }}
                   >{action === 'save' ? copy.saving : copy.saveDraft}</button>
                   <button
                     type="button"
-                    disabled={editor.dirty || editor.planId === undefined || action !== null}
+                    disabled={!networkReady || editor.dirty || editor.planId === undefined || action !== null}
                     onClick={() => { void runPreflight() }}
                   >{action === 'preflight' ? copy.checking : copy.runPreflight}</button>
                   <button
@@ -1709,6 +1834,7 @@ export function AgentPlanWorkbench({
               <DiagnosticList
                 diagnostics={preflight.diagnostics}
                 accepted={acceptedWarnings}
+                disabled={!networkReady || action !== null}
                 onAccepted={(code, value) => {
                   setAcceptedWarnings((previous) => {
                     const next = new Set(previous)
@@ -1724,6 +1850,9 @@ export function AgentPlanWorkbench({
               />
             </>
           )}
+          {editor.state === 'approved' && executeArmed ? (
+            <p className={css.preflightEmpty} role="alert">{copy.executionWarning}</p>
+          ) : null}
         </section>
       )}
     </section>

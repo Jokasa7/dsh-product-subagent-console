@@ -27,7 +27,7 @@ const resourceClaimSchema = z.string().trim().min(1).max(256).superRefine((value
   }
 }).transform(canonicalResourceClaim)
 
-export const capabilitySupportSchema = z.enum(['enforced', 'advisory', 'unsupported'])
+export const capabilitySupportSchema = z.enum(['enforced', 'advisory', 'unsupported', 'unknown'])
 export type CapabilitySupport = z.infer<typeof capabilitySupportSchema>
 
 /** Safe machine reasons carried in the bounded prefix of planner command errors. */
@@ -116,6 +116,7 @@ export const planRoleSchema = z.object({
   transportProvider: boundedNameSchema,
   llmProvider: boundedNameSchema.optional(),
   model: boundedNameSchema.optional(),
+  reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'unknown']).optional(),
   agentPreset: boundedNameSchema.optional(),
   contextMode: z.enum(['fresh', 'fork']).default('fresh'),
   toolPolicy: toolPolicySchema.default({ mode: 'inherit' }),
@@ -142,6 +143,17 @@ export const planTaskSchema = z.object({
   resourceClaims: z.array(resourceClaimSchema).max(32).default([]),
   risk: z.enum(['low', 'medium', 'high']).default('low'),
   approvalRequired: z.boolean().default(false),
+  effect: z.object({
+    kind: z.enum(['pure', 'idempotent', 'compensatable', 'irreversible', 'unknown']),
+    idempotencyScope: z.string().trim().min(1).max(256).optional(),
+    compensationRef: z.string().trim().min(1).max(256).optional(),
+  }).strict().optional(),
+  verifiers: z.array(z.object({
+    verifierId: identifierSchema,
+    kind: z.enum(['lifecycle', 'schema', 'test', 'manual']),
+    description: z.string().trim().min(1).max(1_000),
+    required: z.boolean().default(true),
+  }).strict()).max(16).optional(),
   budgetHint: z.object({
     maxTokens: z.number().int().positive().max(10_000_000).optional(),
     maxCostUsd: z.number().positive().max(10_000).optional(),
@@ -242,7 +254,79 @@ export const planExecutionSchema = z.object({
   startedAt: z.number().finite().optional(),
   finishedAt: z.number().finite().optional(),
   bindings: z.array(planRunBindingSchema).max(512).default([]),
-}).strict()
+}).strict().superRefine((execution, context) => {
+  const terminalExecution = ['succeeded', 'partial', 'failed', 'cancelled', 'unknown'].includes(execution.status)
+  if (terminalExecution !== (execution.finishedAt !== undefined)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['finishedAt'],
+      message: terminalExecution
+        ? 'terminal executions require finishedAt'
+        : 'nonterminal executions cannot contain finishedAt',
+    })
+  }
+  if (execution.startedAt !== undefined && execution.startedAt < execution.createdAt) {
+    context.addIssue({ code: 'custom', path: ['startedAt'], message: 'startedAt cannot precede createdAt' })
+  }
+  if (
+    execution.finishedAt !== undefined
+    && execution.startedAt !== undefined
+    && execution.finishedAt < execution.startedAt
+  ) {
+    context.addIssue({ code: 'custom', path: ['finishedAt'], message: 'finishedAt cannot precede startedAt' })
+  }
+  const attemptIds = new Set<string>()
+  const taskAttempts = new Map<string, Map<number, string>>()
+  for (const [index, binding] of execution.bindings.entries()) {
+    if (
+      binding.planId !== execution.planId
+      || binding.planRevision !== execution.planRevision
+      || binding.executionId !== execution.executionId
+    ) {
+      context.addIssue({ code: 'custom', path: ['bindings', index], message: 'binding identity must match its execution' })
+    }
+    if (attemptIds.has(binding.attemptId)) {
+      context.addIssue({ code: 'custom', path: ['bindings', index, 'attemptId'], message: 'attemptId must be unique' })
+    }
+    attemptIds.add(binding.attemptId)
+    const attempts = taskAttempts.get(binding.taskId) ?? new Map<number, string>()
+    if (attempts.has(binding.attemptNumber)) {
+      context.addIssue({ code: 'custom', path: ['bindings', index, 'attemptNumber'], message: 'task attempt numbers must be unique' })
+    }
+    attempts.set(binding.attemptNumber, binding.attemptId)
+    taskAttempts.set(binding.taskId, attempts)
+    const terminalAttempt = [
+      'completed', 'failed', 'cancelled', 'rejected', 'skipped', 'unknown',
+    ].includes(binding.status)
+    if (terminalAttempt !== (binding.finishedAt !== undefined)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['bindings', index, 'finishedAt'],
+        message: terminalAttempt
+          ? 'terminal attempts require finishedAt'
+          : 'nonterminal attempts cannot contain finishedAt',
+      })
+    }
+    if (
+      binding.finishedAt !== undefined
+      && binding.startedAt !== undefined
+      && binding.finishedAt < binding.startedAt
+    ) {
+      context.addIssue({ code: 'custom', path: ['bindings', index, 'finishedAt'], message: 'attempt finishedAt cannot precede startedAt' })
+    }
+  }
+  for (const [index, binding] of execution.bindings.entries()) {
+    if (binding.retryOf === undefined) continue
+    const previous = execution.bindings.find(candidate => candidate.attemptId === binding.retryOf)
+    if (
+      previous === undefined
+      || previous.taskId !== binding.taskId
+      || previous.attemptNumber >= binding.attemptNumber
+    ) {
+      context.addIssue({ code: 'custom', path: ['bindings', index, 'retryOf'], message: 'retryOf must reference an earlier attempt for the same task' })
+    }
+  }
+})
 export type PlanExecution = z.infer<typeof planExecutionSchema>
 
 export const transportProviderCapabilitySchema = z.object({
@@ -289,6 +373,15 @@ export const executionCapabilitySnapshotSchema = z.object({
     tokens: capabilitySupportSchema,
     cost: capabilitySupportSchema,
   }).strict(),
+  contractSupport: z.object({
+    reasoningEffort: capabilitySupportSchema,
+    verifiers: z.object({
+      lifecycle: capabilitySupportSchema,
+      schema: capabilitySupportSchema,
+      test: capabilitySupportSchema,
+      manual: capabilitySupportSchema,
+    }).strict(),
+  }).strict(),
   limits: z.object({
     maxAgents: z.number().int().min(1).max(32),
     maxConcurrent: z.number().int().min(1).max(16),
@@ -325,7 +418,7 @@ export const planRepositorySnapshotSchema = z.object({
   hostStartedAt: z.number().finite(),
   revision: z.number().int().nonnegative(),
   capturedAt: z.number().finite(),
-  durability: z.literal('host-only'),
+  durability: z.enum(['host-only', 'disk']),
   plans: z.array(agentPlanRevisionSchema).max(5_000),
 }).strict()
 export type PlanRepositorySnapshot = z.infer<typeof planRepositorySnapshotSchema>
@@ -336,7 +429,7 @@ export const planExecutionRepositorySnapshotSchema = z.object({
   hostStartedAt: z.number().finite(),
   revision: z.number().int().nonnegative(),
   capturedAt: z.number().finite(),
-  durability: z.literal('host-only'),
+  durability: z.enum(['host-only', 'disk']),
   executions: z.array(planExecutionSchema).max(5_000),
 }).strict()
 export type PlanExecutionRepositorySnapshot = z.infer<typeof planExecutionRepositorySnapshotSchema>

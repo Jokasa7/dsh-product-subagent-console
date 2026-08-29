@@ -114,6 +114,15 @@ const CAPABILITIES = {
     tokens: 'unsupported',
     cost: 'unsupported',
   },
+  contractSupport: {
+    reasoningEffort: 'unsupported',
+    verifiers: {
+      lifecycle: 'enforced',
+      schema: 'unsupported',
+      test: 'unsupported',
+      manual: 'unsupported',
+    },
+  },
   limits: { maxAgents: 32, maxConcurrent: 4 },
   experimentalAgentTeam: false,
 } as const
@@ -227,6 +236,12 @@ function bench(options: {
   return { call, injected, prompt }
 }
 
+function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settle) => { resolve = settle })
+  return { promise, resolve }
+}
+
 describe('browser planner RPC injection', () => {
   it('validates every planner response and preserves cursors and cancellation', async () => {
     const { call, injected } = bench()
@@ -267,12 +282,6 @@ describe('browser planner RPC injection', () => {
       2,
       signal,
     )).resolves.toEqual(EXECUTION_SNAPSHOT)
-    await expect(injected.cancelPlanExecution({
-      parentSessionId: 'parent',
-      executionId: EXECUTION_ID,
-      reason: 'Stopped by user',
-    }, signal)).resolves.toEqual({ status: 'requested' })
-
     expect(call).toHaveBeenNthCalledWith(
       2,
       '/product-subagent-console',
@@ -365,6 +374,66 @@ describe('browser planner RPC injection', () => {
       planId: PLAN_ID,
       revision: 1,
     }, signal)).rejects.toThrow('does not belong to current session')
+    expect(prompt).not.toHaveBeenCalled()
+  })
+
+  it('never queues a late prompt after its preceding RPC is aborted', async () => {
+    const { call, injected, prompt } = bench()
+
+    const designRpc = deferred<{ ok: true; value: unknown }>()
+    call.mockImplementationOnce(async () => designRpc.promise)
+    const designController = new AbortController()
+    const design = injected.requestPlanDesign('parent' as SessionId, '检查发布质量', designController.signal)
+    designController.abort()
+    designRpc.resolve({ ok: true, value: CAPABILITIES })
+    await expect(design).rejects.toMatchObject({ name: 'AbortError' })
+    expect(prompt).not.toHaveBeenCalled()
+
+    const executionRpc = deferred<{ ok: true; value: unknown }>()
+    call.mockImplementationOnce(async () => executionRpc.promise)
+    const executionController = new AbortController()
+    const execution = injected.requestPlanExecution('parent' as SessionId, {
+      parentSessionId: 'parent', planId: PLAN_ID, revision: 1,
+    }, executionController.signal)
+    executionController.abort()
+    executionRpc.resolve({
+      ok: true,
+      value: {
+        grantId: GRANT_ID,
+        parentSessionId: 'parent',
+        planId: PLAN_ID,
+        revision: 1,
+        capabilityDigest: 'enforced-digest',
+        executeToolName: 'execute_subagent_plan',
+        expiresAt: Date.now() + 60_000,
+      },
+    })
+    await expect(execution).rejects.toMatchObject({ name: 'AbortError' })
+    expect(prompt).not.toHaveBeenCalled()
+
+    const inspectRpc = deferred<{ ok: true; value: unknown }>()
+    call.mockImplementationOnce(async () => inspectRpc.promise)
+    const inspectController = new AbortController()
+    const ask = injected.askRun('parent' as SessionId, {
+      parentSessionId: 'parent', runId: EXECUTION_ID, kind: 'summary',
+    }, 'What happened?', inspectController.signal)
+    inspectController.abort()
+    inspectRpc.resolve({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        queryId: `sha256:${'a'.repeat(64)}`,
+        parentSessionId: 'parent',
+        runId: EXECUTION_ID,
+        kind: 'summary',
+        throughCursor: 0,
+        state: 'unknown',
+        answerCode: 'insufficient-evidence',
+        facts: [],
+        hypotheses: [],
+      },
+    })
+    await expect(ask).rejects.toMatchObject({ name: 'AbortError' })
     expect(prompt).not.toHaveBeenCalled()
   })
 

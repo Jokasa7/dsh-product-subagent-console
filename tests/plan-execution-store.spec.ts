@@ -124,6 +124,22 @@ describe('Plan execution snapshot repository', () => {
     expect(repository.revision).toBe(2)
   })
 
+  it('exposes a non-mutating capacity boundary before an external Workflow starts', () => {
+    const blocked = new PlanExecutionSnapshotRepository(2)
+    blocked.upsert(execution(1, { status: 'queued' }))
+    blocked.upsert(execution(2, { status: 'running' }))
+    expect(() => blocked.assertCanInsert()).toThrow(PlanExecutionCapacityError)
+    expect(blocked.size).toBe(2)
+    expect(blocked.revision).toBe(2)
+
+    const evictable = new PlanExecutionSnapshotRepository(2)
+    evictable.upsert(execution(1, { status: 'running' }))
+    evictable.upsert(execution(2, { status: 'succeeded', finishedAt: 3_000 }))
+    expect(() => evictable.assertCanInsert()).not.toThrow()
+    expect(evictable.size).toBe(2)
+    expect(evictable.revision).toBe(2)
+  })
+
   it('contains listener failures, including failures in the error reporter', () => {
     const observed: number[] = []
     const repository = new PlanExecutionSnapshotRepository(10, Date.now, () => {
@@ -177,5 +193,40 @@ describe('Plan execution snapshot repository', () => {
     repository.upsert(terminal)
     expect(() => repository.upsert({ ...terminal, cancellationRequested: true }))
       .toThrow(/terminal plan execution snapshot is immutable/)
+  })
+
+  it('rejects status regression, disappearing timestamps, and disappearing attempts', () => {
+    const repository = new PlanExecutionSnapshotRepository()
+    const active = {
+      ...execution(1),
+      bindings: execution(1).bindings.map(binding => ({
+        ...binding,
+        startedAt: 1_000,
+        childId: 'child-a',
+      })),
+    }
+    repository.upsert(active)
+
+    expect(() => repository.upsert({ ...active, status: 'queued' }))
+      .toThrow(/status regressed/)
+    expect(() => repository.upsert({
+      ...active,
+      bindings: active.bindings.map(binding => {
+        const { startedAt: _startedAt, ...withoutStart } = binding
+        return withoutStart
+      }),
+    })).toThrow(/startedAt changed or disappeared/)
+    expect(() => repository.upsert({ ...active, bindings: [] }))
+      .toThrow(/attempt disappeared/)
+    expect(repository.get('parent-a', active.executionId)).toEqual(active)
+    expect(repository.revision).toBe(1)
+  })
+
+  it('restores atomically when a later durable record is invalid', () => {
+    const repository = new PlanExecutionSnapshotRepository()
+    const first = execution(1)
+    expect(() => repository.restore([first, first])).toThrow(/duplicate restored/)
+    expect(repository.size).toBe(0)
+    expect(repository.revision).toBe(0)
   })
 })

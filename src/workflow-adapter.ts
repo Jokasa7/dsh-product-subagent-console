@@ -190,6 +190,24 @@ export interface WorkflowTaskBindingEvent {
   readonly workflowSeq: number
 }
 
+/** Authoritative terminal lifecycle for an approved plan-task child. */
+export interface WorkflowTaskTerminalEvent extends WorkflowTaskBindingEvent {
+  readonly attemptId: string
+  readonly observedAt: number
+  readonly outcome: 'completed' | 'failed' | 'cancelled'
+}
+
+/** Official Workflow Agent that could not be bound to an approved task ID. */
+export interface WorkflowUnboundAgentEvent {
+  readonly executionId: string
+  readonly workflowRunId: string
+  readonly parentSessionId: string
+  readonly workflowSeq: number
+  readonly childId: string
+  readonly phase: 'start' | 'end'
+  readonly outcome?: 'completed' | 'failed' | 'cancelled'
+}
+
 export interface WorkflowPlanExecutionAdapterOptions<Parent> {
   readonly engine: WorkflowEngineLike<Parent>
   readonly events?: WorkflowLifecycleRegistrar
@@ -201,6 +219,10 @@ export interface WorkflowPlanExecutionAdapterOptions<Parent> {
   readonly now?: () => number
   readonly uuid?: () => string
   readonly onTaskBound?: (binding: WorkflowTaskBindingEvent) => void
+  readonly onTaskTerminal?: (event: WorkflowTaskTerminalEvent) => void
+  readonly onUnboundAgent?: (event: WorkflowUnboundAgentEvent) => void
+  /** Synchronous durable checkpoint before external start, and unknown closure if start throws. */
+  readonly onExecutionCheckpoint?: (snapshot: PlanExecution) => void
   readonly onListenerError?: (error: unknown) => void
 }
 
@@ -289,12 +311,16 @@ export class WorkflowPlanExecutionAdapter<Parent> {
   private readonly cancelGraceMs: number
   private readonly disposeGraceMs: number
   private readonly onTaskBound: (binding: WorkflowTaskBindingEvent) => void
+  private readonly onTaskTerminal: (event: WorkflowTaskTerminalEvent) => void
+  private readonly onUnboundAgent: (event: WorkflowUnboundAgentEvent) => void
+  private readonly onExecutionCheckpoint: (snapshot: PlanExecution) => void
   private readonly onListenerError: (error: unknown) => void
   private readonly activeByWorkflowId = new Map<string, ActiveExecution>()
   private readonly records = new Map<string, StoredExecution>()
   private readonly listeners = new Set<(snapshot: PlanExecution) => void>()
   private readonly eventDisposers: (() => void)[] = []
   private disposed = false
+  private disposePromise: Promise<void> | undefined
 
   constructor(options: WorkflowPlanExecutionAdapterOptions<Parent>) {
     this.engine = options.engine
@@ -304,6 +330,9 @@ export class WorkflowPlanExecutionAdapter<Parent> {
     this.cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS
     this.disposeGraceMs = options.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS
     this.onTaskBound = options.onTaskBound ?? (() => {})
+    this.onTaskTerminal = options.onTaskTerminal ?? (() => {})
+    this.onUnboundAgent = options.onUnboundAgent ?? (() => {})
+    this.onExecutionCheckpoint = options.onExecutionCheckpoint ?? (() => {})
     this.onListenerError = options.onListenerError ?? (() => {})
     if (!Number.isInteger(this.maxHistory) || this.maxHistory < 1 || this.maxHistory > 5_000) {
       throw new Error('maxHistory must be an integer from 1 to 5000')
@@ -357,6 +386,14 @@ export class WorkflowPlanExecutionAdapter<Parent> {
       else input.signal.addEventListener('abort', onInputAbort, { once: true })
     }
 
+    try {
+      this.onExecutionCheckpoint(tracker.snapshot())
+    } catch (error: unknown) {
+      input.signal?.removeEventListener('abort', onInputAbort)
+      if (!controller.signal.aborted) controller.abort('execution checkpoint failed')
+      throw error
+    }
+
     let workflowRun: WorkflowRunLike
     try {
       workflowRun = this.engine.start({
@@ -370,6 +407,10 @@ export class WorkflowPlanExecutionAdapter<Parent> {
       })
     } catch (error: unknown) {
       input.signal?.removeEventListener('abort', onInputAbort)
+      tracker.finish('unknown')
+      try { this.onExecutionCheckpoint(tracker.snapshot()) } catch (checkpointError: unknown) {
+        this.onListenerError(checkpointError)
+      }
       throw error
     }
 
@@ -377,7 +418,12 @@ export class WorkflowPlanExecutionAdapter<Parent> {
     const cancellationWatchdog = createCancellationWatchdog(this.cancelGraceMs)
     let active!: ActiveExecution
     const cancel = (reason = 'Agent plan execution cancelled'): void => {
-      if (isTerminalPlanExecutionStatus(tracker.snapshot().status)) return
+      const current = tracker.snapshot()
+      if (
+        isTerminalPlanExecutionStatus(current.status)
+        || current.status === 'stopping'
+        || current.cancellationRequested
+      ) return
       tracker.requestCancellation()
       cancellationWatchdog.arm()
       if (!controller.signal.aborted) controller.abort(reason)
@@ -446,9 +492,18 @@ export class WorkflowPlanExecutionAdapter<Parent> {
 
   cancel(parentSessionId: string, executionId: string, reason?: string): boolean {
     const record = this.records.get(executionId)
-    if (record === undefined || record.tracker.snapshot().parentSessionId !== parentSessionId) return false
+    const snapshot = record?.tracker.snapshot()
+    if (
+      record === undefined
+      || snapshot === undefined
+      || snapshot.parentSessionId !== parentSessionId
+      || record.handle === undefined
+      || isTerminalPlanExecutionStatus(snapshot.status)
+      || snapshot.status === 'stopping'
+      || snapshot.cancellationRequested
+    ) return false
     record.handle?.cancel(reason)
-    return record.handle !== undefined
+    return true
   }
 
   async disposeExecution(parentSessionId: string, executionId: string): Promise<boolean> {
@@ -459,9 +514,14 @@ export class WorkflowPlanExecutionAdapter<Parent> {
     return true
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return
+  dispose(): Promise<void> {
+    if (this.disposePromise !== undefined) return this.disposePromise
     this.disposed = true
+    this.disposePromise = this.disposeInternal()
+    return this.disposePromise
+  }
+
+  private async disposeInternal(): Promise<void> {
     const handles = [...this.records.values()]
       .map(record => record.handle)
       .filter((handle): handle is PlanExecutionRun => handle !== undefined)
@@ -516,6 +576,7 @@ export class WorkflowPlanExecutionAdapter<Parent> {
       const summary = readWorkflowSummary(result.value, plan.tasks.map(task => task.taskId), result.agentsStarted)
       if (summary === undefined) {
         tracker.markUnsettledAttempts('unknown')
+        tracker.finish('unknown')
       } else {
         for (const item of summary) tracker.applyReportedStatus(item.taskId, item.status)
       }
@@ -582,7 +643,11 @@ export class WorkflowPlanExecutionAdapter<Parent> {
     const active = this.activeByWorkflowId.get(runId)
     const taskId = active?.labels.get(agent.label)
     const taskTitle = taskId === undefined ? undefined : active?.taskTitles.get(taskId)
-    if (active === undefined || taskId === undefined || taskTitle === undefined) return
+    if (active === undefined) return
+    if (taskId === undefined || taskTitle === undefined) {
+      this.publishUnboundAgent(active, runId, agent, 'start')
+      return
+    }
     active.tracker.markAttemptRunning(taskId, {
       workflowSeq: agent.seq,
       childId: agent.childId,
@@ -608,11 +673,53 @@ export class WorkflowPlanExecutionAdapter<Parent> {
   ): void {
     const active = this.activeByWorkflowId.get(runId)
     const taskId = active?.labels.get(agent.label)
-    if (active === undefined || taskId === undefined) return
+    if (active === undefined) return
+    if (taskId === undefined) {
+      this.publishUnboundAgent(active, runId, agent, 'end')
+      return
+    }
+    const observedAt = this.now()
     active.tracker.markAttemptFinished(taskId, agent.outcome, {
       workflowSeq: agent.seq,
       childId: agent.childId,
-    }, this.now())
+    }, observedAt, binding => {
+      try {
+        this.onTaskTerminal({
+          executionId: active.executionId,
+          parentSessionId: active.parentSessionId,
+          taskId,
+          taskTitle: active.taskTitles.get(taskId) ?? taskId,
+          attemptId: binding.attemptId,
+          childId: agent.childId,
+          workflowSeq: agent.seq,
+          observedAt,
+          outcome: agent.outcome,
+        })
+      } catch (error: unknown) {
+        this.onListenerError(error)
+      }
+    })
+  }
+
+  private publishUnboundAgent(
+    active: ActiveExecution,
+    workflowRunId: string,
+    agent: WorkflowAgentEvent,
+    phase: 'start' | 'end',
+  ): void {
+    try {
+      this.onUnboundAgent({
+        executionId: active.executionId,
+        workflowRunId,
+        parentSessionId: active.parentSessionId,
+        workflowSeq: agent.seq,
+        childId: agent.childId,
+        phase,
+        ...(phase === 'end' && agent.outcome !== undefined ? { outcome: agent.outcome } : {}),
+      })
+    } catch (error: unknown) {
+      this.onListenerError(error)
+    }
   }
 
   private makeHistoryRoom(): void {
@@ -811,5 +918,6 @@ function readWorkflowSummary(
     found.add(item.taskId)
     summary.push({ taskId: item.taskId, status: item.status as 'completed' | 'failed' | 'skipped' })
   }
-  return found.size === expected.size ? summary : undefined
+  if (found.size !== expected.size) return undefined
+  return summary.filter(task => task.status !== 'skipped').length === agentsStarted ? summary : undefined
 }

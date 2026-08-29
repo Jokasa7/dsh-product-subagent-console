@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,7 +18,10 @@ const listed = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-
 if (listed.error !== undefined) throw listed.error
 if (listed.status !== 0) throw new Error(`git ls-files failed (${String(listed.status)}): ${listed.stderr.trim()}`)
 
-const paths = listed.stdout.split('\0').filter(Boolean).map(path => path.replaceAll('\\', '/'))
+const paths = listed.stdout.split('\0')
+  .filter(Boolean)
+  .map(path => path.replaceAll('\\', '/'))
+  .filter(path => existsSync(resolve(root, path)))
 const forbiddenPaths = [
   /(?:^|\/)\.ai(?:\/|$)/i,
   /(?:^|\/)(?:AGENTS|CLAUDE|GEMINI)\.md$/i,

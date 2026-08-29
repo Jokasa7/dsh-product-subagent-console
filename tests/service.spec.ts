@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -16,18 +20,39 @@ import SubagentRuntime, {
 } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ProductSubagentConsoleService from '../src/index.js'
+import { FoundryEventLedger } from '../src/event-ledger.js'
+import { foundrySnapshotSchema } from '../src/foundry-types.js'
 import {
   executionCapabilitySnapshotSchema,
   planRepositorySnapshotSchema,
   type AgentPlanContent,
+  type AgentPlanRevision,
+  type PlanExecution,
 } from '../src/plan-types.js'
 import { consoleSnapshotSchema } from '../src/types.js'
+import { verifiedRun } from './foundry-fixtures.js'
 
 const contexts: Context[] = []
+const tempRoots: string[] = []
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(async ctx => ctx.fiber.dispose()))
+  const safeRoot = resolve(tmpdir())
+  for (const root of tempRoots.splice(0)) {
+    const target = resolve(root)
+    if (!target.startsWith(`${safeRoot}\\`) && !target.startsWith(`${safeRoot}/`)) {
+      throw new Error(`refusing to remove temp path outside ${safeRoot}`)
+    }
+    rmSync(target, { recursive: true, force: true })
+  }
 })
+
+function tempRoot(): string {
+  const root = join(tmpdir(), `dsh-foundry-host-${randomUUID()}`)
+  mkdirSync(root, { recursive: false })
+  tempRoots.push(root)
+  return root
+}
 
 class FakeSystemPromptService extends Service {
   constructor(ctx: Context) {
@@ -157,7 +182,7 @@ async function harness(config: ConstructorParameters<typeof ProductSubagentConso
   await ctx.plugin(ToolRuntime).await()
   await ctx.plugin(SubagentRuntime).await()
   await ctx.plugin(FakeConnectionService).await()
-  const consoleFiber = ctx.plugin(ProductSubagentConsoleService, config)
+  const consoleFiber = ctx.plugin(ProductSubagentConsoleService, { foundryStorage: false, ...config })
   await consoleFiber.await()
   return {
     ctx,
@@ -201,6 +226,24 @@ function registerDelegatingTool(ctx: Context, provider: string): () => void {
       }
     },
   }))
+}
+
+function seedFoundryRun(
+  service: ProductSubagentConsoleService,
+  plan: AgentPlanRevision,
+  execution: PlanExecution,
+): { readonly reservedControlEventSlots: () => number } {
+  const internal = service as unknown as {
+    readonly plans: { restore: (plans: readonly AgentPlanRevision[]) => void }
+    readonly executions: { restore: (executions: readonly PlanExecution[]) => void }
+    readonly foundry: FoundryEventLedger
+    readonly reservedControlEventSlots: number
+  }
+  internal.foundry.recordPlanRevision(plan)
+  internal.foundry.recordExecutionSnapshot(execution)
+  internal.plans.restore([plan])
+  internal.executions.restore([execution])
+  return { reservedControlEventSlots: () => internal.reservedControlEventSlots }
 }
 
 describe('ProductSubagentConsoleService with DSH 0.1.1-rc.2 runtimes', () => {
@@ -328,6 +371,221 @@ describe('ProductSubagentConsoleService with DSH 0.1.1-rc.2 runtimes', () => {
       expectedRevision: 1,
       content: planContent('Stale'),
     }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'command-error' } })
+  })
+
+  it('persists plan revisions on disk and restores them in a new Host generation', async () => {
+    const storageDirectory = tempRoot()
+    const first = await harness({ foundryStorage: true, foundryStorageDirectory: storageDirectory })
+    const saved = first.service.savePlanDraft({
+      parentSessionId: 'parent-a',
+      expectedRevision: 0,
+      content: planContent('Durable plan'),
+    })
+    expect(first.service.planSnapshot(['parent-a'])).toMatchObject({
+      durability: 'disk',
+      plans: [{ planId: saved.planId, revision: 1 }],
+    })
+    expect(first.service.foundrySnapshot(['parent-a']).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'plan-saved', authority: 'user' }),
+    ]))
+    await first.consoleFiber.dispose()
+
+    const second = await harness({ foundryStorage: true, foundryStorageDirectory: storageDirectory })
+    expect(second.service.planSnapshot(['parent-a'])).toMatchObject({
+      durability: 'disk',
+      plans: [{ planId: saved.planId, revision: 1, title: 'Durable plan' }],
+    })
+    expect(second.service.planSnapshot(['parent-b']).plans).toEqual([])
+  })
+
+  it('closes a recovered nonterminal durable execution as unknown without inventing success', async () => {
+    const storageDirectory = tempRoot()
+    const source = verifiedRun(9)
+    const { finishedAt: _finishedAt, ...runningBase } = source.execution
+    const running = {
+      ...runningBase,
+      status: 'running' as const,
+      bindings: source.execution.bindings.map(binding => {
+        const { finishedAt: _bindingFinishedAt, ...bindingBase } = binding
+        return { ...bindingBase, status: 'running' as const }
+      }),
+    }
+    const ledger = new FoundryEventLedger({ storageDirectory })
+    ledger.recordPlanRevision(source.plan)
+    ledger.recordExecutionSnapshot(running)
+    ledger.dispose()
+
+    const fixture = await harness({ foundryStorage: true, foundryStorageDirectory: storageDirectory })
+    const snapshot = foundrySnapshotSchema.parse(fixture.service.foundrySnapshot(['parent-a']))
+    expect(snapshot).toMatchObject({ durability: 'disk', storageStatus: 'ready' })
+    expect(snapshot.executions).toEqual([
+      expect.objectContaining({
+        executionId: source.execution.executionId,
+        status: 'unknown',
+        bindings: [expect.objectContaining({ status: 'unknown' })],
+      }),
+    ])
+    expect(snapshot.events.map(event => event.type)).toEqual(expect.arrayContaining([
+      'execution-terminal',
+      'attempt-terminal',
+    ]))
+    expect(JSON.stringify(snapshot)).not.toContain('succeeded')
+  })
+
+  it('closes requested-only and consumed-only control chains after a Host restart idempotently', async () => {
+    const storageDirectory = tempRoot()
+    const ledger = new FoundryEventLedger({ storageDirectory })
+    const requestedOnly = ledger.recordEvent({
+      source: 'foundry-control',
+      sourceEventId: 'requested-only',
+      parentSessionId: 'parent-a',
+      runId: '00000000-0000-4000-8000-000000000901',
+      planId: '00000000-0000-4000-8000-000000000902',
+      planRevision: 1,
+      type: 'control-requested',
+      authority: 'user',
+      observedAt: 10,
+      causalParents: [],
+      controlAction: 'cancel',
+      controlProposalId: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      controlEventCursor: 0,
+      artifacts: [],
+    })
+    const requestedThenConsumed = ledger.recordEvent({
+      source: 'foundry-control',
+      sourceEventId: 'requested-then-consumed',
+      parentSessionId: 'parent-a',
+      runId: '00000000-0000-4000-8000-000000000903',
+      planId: '00000000-0000-4000-8000-000000000904',
+      planRevision: 1,
+      type: 'control-requested',
+      authority: 'user',
+      observedAt: 20,
+      causalParents: [],
+      controlAction: 'cancel',
+      controlProposalId: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      controlEventCursor: 0,
+      artifacts: [],
+    })
+    const consumed = ledger.recordEvent({
+      source: 'foundry-control',
+      sourceEventId: 'consumed-without-result',
+      parentSessionId: 'parent-a',
+      runId: requestedThenConsumed.runId,
+      planId: requestedThenConsumed.planId,
+      planRevision: requestedThenConsumed.planRevision,
+      type: 'control-consumed',
+      authority: 'user',
+      observedAt: 21,
+      causalParents: [requestedThenConsumed.eventId],
+      controlAction: 'cancel',
+      controlProposalId: requestedThenConsumed.controlProposalId,
+      controlEventCursor: requestedThenConsumed.controlEventCursor,
+      artifacts: [],
+    })
+    ledger.dispose()
+
+    const first = await harness({ foundryStorage: true, foundryStorageDirectory: storageDirectory })
+    const recovered = foundrySnapshotSchema.parse(first.service.foundrySnapshot(['parent-a']))
+    expect(recovered.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'control-result',
+        controlResult: 'host-restarted',
+        causalParents: [requestedOnly.eventId],
+      }),
+      expect.objectContaining({
+        type: 'control-result',
+        controlResult: 'interrupted',
+        causalParents: [consumed.eventId],
+      }),
+    ]))
+    const closureCount = recovered.events.filter(event => (
+      event.type === 'control-result'
+      && ['host-restarted', 'interrupted'].includes(event.controlResult ?? '')
+    )).length
+    await first.consoleFiber.dispose()
+
+    const second = await harness({ foundryStorage: true, foundryStorageDirectory: storageDirectory })
+    const replayed = foundrySnapshotSchema.parse(second.service.foundrySnapshot(['parent-a']))
+    expect(replayed.events.filter(event => (
+      event.type === 'control-result'
+      && ['host-restarted', 'interrupted'].includes(event.controlResult ?? '')
+    ))).toHaveLength(closureCount)
+  })
+
+  it('expires an abandoned control grant and releases its Event reservation without another RPC', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    try {
+      const fixture = await harness()
+      const source = verifiedRun(95)
+      const { finishedAt: _finishedAt, ...executionBase } = source.execution
+      const running: PlanExecution = {
+        ...executionBase,
+        status: 'running',
+        bindings: source.execution.bindings.map(binding => {
+          const { finishedAt: _bindingFinishedAt, ...bindingBase } = binding
+          return { ...bindingBase, status: 'running' as const }
+        }),
+      }
+      const internal = seedFoundryRun(fixture.service, source.plan, running)
+      const preview = fixture.service.foundrySnapshot(['parent-a']).recoveryProposals[0]
+      if (preview === undefined) throw new Error('fixture recovery proposal missing')
+      fixture.service.issueCancelControlGrant({
+        parentSessionId: 'parent-a',
+        runId: running.executionId,
+        proposalId: preview.proposalId,
+        eventCursor: preview.eventCursor,
+      })
+      expect(internal.reservedControlEventSlots()).toBe(2)
+
+      await vi.advanceTimersByTimeAsync(121_000)
+
+      expect(fixture.service.foundrySnapshot(['parent-a']).events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'control-expired', runId: running.executionId }),
+      ]))
+      expect(internal.reservedControlEventSlots()).toBe(0)
+      await fixture.consoleFiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('validates and isolates Foundry RPC snapshots and factual missing-run queries', async () => {
+    const { connection } = await harness()
+    const signal = new AbortController().signal
+    await expect(connection.handler?.('foundry.list', {
+      parentSessionIds: [],
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    await expect(connection.handler?.('foundry.list', {
+      parentSessionIds: ['parent-a'],
+      prompt: 'SECRET must be rejected',
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const listed = await connection.handler?.('foundry.list', {
+      parentSessionIds: ['parent-a'],
+    }, signal)
+    if (listed?.ok !== true) throw new Error('fixture expected a Foundry snapshot')
+    expect(foundrySnapshotSchema.parse(listed.value)).toMatchObject({
+      durability: 'memory',
+      plans: [],
+      executions: [],
+    })
+
+    await expect(connection.handler?.('foundry.inspect', {
+      parentSessionId: 'parent-a',
+      runId: 'missing-run',
+      kind: 'summary',
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        parentSessionId: 'parent-a',
+        runId: 'missing-run',
+        answerCode: 'run-not-found',
+        facts: [],
+        hypotheses: [],
+      },
+    })
   })
 
   it('uses AsyncLocalStorage to correlate concurrent official tool/subagent lifecycles exactly', async () => {
@@ -501,6 +759,120 @@ describe('ProductSubagentConsoleService with DSH 0.1.1-rc.2 runtimes', () => {
     await expect(active).rejects.toThrow('active start aborted')
     await expect(queued).rejects.toThrow('cancelled before admission')
     expect(queuedEntered).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch a planner mutation when cancellation lands between RPC stages', async () => {
+    const { service, connection } = await harness()
+    const controller = new AbortController()
+    const internal = service as unknown as {
+      handleFoundryRpc: (
+        endpoint: string,
+        payload: unknown,
+        signal: AbortSignal,
+      ) => Promise<unknown | undefined>
+    }
+    const foundryStage = vi.spyOn(internal, 'handleFoundryRpc').mockImplementation(async () => {
+      controller.abort('cancelled between dispatch stages')
+      return undefined
+    })
+
+    await expect(connection.handler?.('planner.save', {
+      parentSessionId: 'parent-a',
+      expectedRevision: 0,
+      content: planContent('Must not be saved'),
+    }, controller.signal)).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+    expect(foundryStage).toHaveBeenCalledOnce()
+    expect(service.planSnapshot(['parent-a']).plans).toEqual([])
+  })
+
+  it('releases admission without starting when the caller aborts before permit delivery', async () => {
+    const { service } = await harness()
+    const controller = new AbortController()
+    const permit = Promise.withResolvers<() => void>()
+    const release = vi.fn()
+    const start = vi.fn<() => Promise<SubagentRun>>()
+    const internal = service as unknown as {
+      readonly admission: { acquire: (signal: AbortSignal) => Promise<() => void> }
+    }
+    vi.spyOn(internal.admission, 'acquire').mockReturnValue(permit.promise)
+    const starting = service.startOwned({
+      parentSessionId: 'parent-admission-race',
+      callId: 'call-admission-race',
+      toolName: 'owned',
+      providerName: 'provider',
+      signal: controller.signal,
+    }, start)
+
+    controller.abort('cancelled before permit delivery')
+    permit.resolve(release)
+
+    await expect(starting).rejects.toMatchObject({ name: 'AbortError' })
+    expect(start).not.toHaveBeenCalled()
+    expect(release).toHaveBeenCalledOnce()
+    expect(service.snapshot(['parent-admission-race']).attempts).toEqual([
+      expect.objectContaining({
+        state: 'not-published',
+        outcome: 'cancelled-before-publication',
+        cancellationRequested: true,
+      }),
+    ])
+  })
+
+  it('disposes and withholds a run that resolves after its owned start was cancelled', async () => {
+    const { service } = await harness()
+    const controller = new AbortController()
+    const deferred = Promise.withResolvers<SubagentRun>()
+    const dispose = vi.fn(async () => {})
+    const starting = service.startOwned({
+      parentSessionId: 'parent-late-run',
+      callId: 'call-late-run',
+      toolName: 'owned',
+      providerName: 'provider',
+      signal: controller.signal,
+    }, async () => deferred.promise)
+    await vi.waitFor(() => {
+      expect(service.snapshot(['parent-late-run']).attempts[0]?.state).toBe('starting')
+    })
+
+    controller.abort('cancelled while provider start was pending')
+    deferred.resolve({
+      id: SessionId('late-child'),
+      localAgent: undefined,
+      result: Promise.resolve({ output: [], stopReason: 'aborted' }),
+      dispose,
+    })
+
+    await expect(starting).rejects.toMatchObject({ name: 'AbortError' })
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(service.snapshot(['parent-late-run']).attempts).toEqual([
+      expect.objectContaining({
+        state: 'not-published',
+        outcome: 'cancelled-before-publication',
+        cancellationRequested: true,
+      }),
+    ])
+  })
+
+  it('keeps a run cursor pinned to exact execution identity when a foreign fact arrives later', async () => {
+    const { service } = await harness()
+    const source = verifiedRun(97)
+    seedFoundryRun(service, source.plan, source.execution)
+    const internal = service as unknown as {
+      readonly foundry: FoundryEventLedger
+      runEventCursor: (parentSessionId: string, runId: string) => number
+    }
+    const firstSourceEvent = source.events[0]
+    if (firstSourceEvent === undefined) throw new Error('fixture event missing')
+    const { schemaVersion: _schemaVersion, eventId: _eventId, cursor: _cursor, ...firstEvent } = firstSourceEvent
+    const exact = internal.foundry.recordEvent(firstEvent)
+    internal.foundry.recordEvent({
+      ...firstEvent,
+      source: 'foreign-fixture',
+      sourceEventId: 'foreign-plan-revision',
+      planId: '00000000-0000-4000-8000-999999999999',
+    })
+
+    expect(internal.runEventCursor(source.execution.parentSessionId, source.execution.executionId)).toBe(exact.cursor)
   })
 
   it('does not report lifecycle-missing when an immediately settled run is trimmed at historyLimit zero', async () => {

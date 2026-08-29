@@ -10,9 +10,6 @@ import {
   agentPlanRevisionSchema,
   APPROVE_PLAN_ENDPOINT,
   approvePlanRequestSchema,
-  CANCEL_PLAN_EXECUTION_ENDPOINT,
-  cancelPlanExecutionRequestSchema,
-  cancelPlanExecutionResultSchema,
   EXECUTION_CAPABILITIES_ENDPOINT,
   executionCapabilitiesRequestSchema,
   executionCapabilitySnapshotSchema,
@@ -34,13 +31,64 @@ import {
   WATCH_PLAN_EXECUTIONS_ENDPOINT,
   watchPlanExecutionsRequestSchema,
   watchPlansRequestSchema,
-  type CancelPlanExecutionRequest,
-  type CancelPlanExecutionResult,
   type ExecutionCapabilitySnapshot,
   type PlanExecutionGrant,
   type PlanExecutionRepositorySnapshot,
   type PlanRevisionRequest,
 } from '../plan-types.js'
+import {
+  COMPARE_FOUNDRY_RUNS_ENDPOINT,
+  compareRunsRequestSchema,
+  EXPORT_RECIPE_ENDPOINT,
+  exportRecipeRequestSchema,
+  exportRecipeResultSchema,
+  EXPORT_RUN_CAPSULE_ENDPOINT,
+  exportRunCapsuleRequestSchema,
+  exportRunCapsuleResultSchema,
+  EXPORT_TELEMETRY_ENDPOINT,
+  exportTelemetryRequestSchema,
+  exportTelemetryResultSchema,
+  foundrySnapshotSchema,
+  EXECUTE_CANCEL_CONTROL_ENDPOINT,
+  executeCancelControlRequestSchema,
+  executeCancelControlResultSchema,
+  INSPECT_FOUNDRY_RUN_ENDPOINT,
+  inspectRunRequestSchema,
+  inspectRunResultSchema,
+  INSTANTIATE_RECIPE_ENDPOINT,
+  instantiateRecipeRequestSchema,
+  instantiateRecipeResultSchema,
+  LIST_FOUNDRY_RUNS_ENDPOINT,
+  ISSUE_CANCEL_CONTROL_GRANT_ENDPOINT,
+  issueCancelGrantRequestSchema,
+  foundryControlGrantSchema,
+  listFoundryRunsRequestSchema,
+  PREVIEW_RECIPE_ENDPOINT,
+  recipeCandidateRequestSchema,
+  recipeCandidateSchema,
+  runAdvisorResultSchema,
+  WATCH_FOUNDRY_RUNS_ENDPOINT,
+  watchFoundryRunsRequestSchema,
+  type CompareRunsRequest,
+  type ExportRecipeRequest,
+  type ExportRecipeResult,
+  type ExportRunCapsuleRequest,
+  type ExportRunCapsuleResult,
+  type ExportTelemetryRequest,
+  type ExportTelemetryResult,
+  type FoundrySnapshot,
+  type ExecuteCancelControlRequest,
+  type ExecuteCancelControlResult,
+  type FoundryControlGrant,
+  type InspectRunRequest,
+  type InspectRunResult,
+  type InstantiateRecipeRequest,
+  type InstantiateRecipeResult,
+  type IssueCancelGrantRequest,
+  type RecipeCandidate,
+  type RecipeCandidateRequest,
+  type RunAdvisorResult,
+} from '../foundry-types.js'
 import {
   consoleSnapshotSchema,
   LIST_SESSIONS_ENDPOINT,
@@ -71,16 +119,61 @@ export interface PlannerWorkbenchInjected extends AgentPlanWorkbenchInjected {
     afterRevision: number,
     signal: AbortSignal,
   ) => Promise<PlanExecutionRepositorySnapshot>
-  readonly cancelPlanExecution: (
-    request: CancelPlanExecutionRequest,
-    signal: AbortSignal,
-  ) => Promise<CancelPlanExecutionResult>
   /** Queue a visible user turn asking the current conversation Agent to execute one approved revision. */
   readonly requestPlanExecution: (
     parentSessionId: SessionId,
     request: PlanRevisionRequest,
     signal: AbortSignal,
   ) => Promise<PlanExecutionGrant>
+  readonly listFoundry: (
+    parentSessionIds: readonly SessionId[],
+    signal: AbortSignal,
+  ) => Promise<FoundrySnapshot>
+  readonly watchFoundry: (
+    parentSessionIds: readonly SessionId[],
+    hostInstanceId: string | undefined,
+    afterRevision: number,
+    signal: AbortSignal,
+  ) => Promise<FoundrySnapshot>
+  readonly inspectRun: (request: InspectRunRequest, signal: AbortSignal) => Promise<InspectRunResult>
+  readonly askRun: (
+    parentSessionId: SessionId,
+    request: InspectRunRequest,
+    question: string,
+    signal: AbortSignal,
+  ) => Promise<InspectRunResult>
+  readonly exportRunCapsule: (
+    request: ExportRunCapsuleRequest,
+    signal: AbortSignal,
+  ) => Promise<ExportRunCapsuleResult>
+  readonly previewRecipe: (
+    request: RecipeCandidateRequest,
+    signal: AbortSignal,
+  ) => Promise<RecipeCandidate>
+  readonly exportRecipe: (
+    request: ExportRecipeRequest,
+    signal: AbortSignal,
+  ) => Promise<ExportRecipeResult>
+  readonly instantiateRecipe: (
+    request: InstantiateRecipeRequest,
+    signal: AbortSignal,
+  ) => Promise<InstantiateRecipeResult>
+  readonly compareRuns: (
+    request: CompareRunsRequest,
+    signal: AbortSignal,
+  ) => Promise<RunAdvisorResult>
+  readonly exportTelemetry: (
+    request: ExportTelemetryRequest,
+    signal: AbortSignal,
+  ) => Promise<ExportTelemetryResult>
+  readonly issueCancelControlGrant: (
+    request: IssueCancelGrantRequest,
+    signal: AbortSignal,
+  ) => Promise<FoundryControlGrant>
+  readonly executeCancelControl: (
+    request: ExecuteCancelControlRequest,
+    signal: AbortSignal,
+  ) => Promise<ExecuteCancelControlResult>
 }
 
 /** Complete browser-injected surface for the runtime and planner workbench modes. */
@@ -129,7 +222,23 @@ export function apply(ctx: ClientContext): void {
     order: 20,
     label: () => t('tab'),
     locale: NS,
-    inject: (sessionId: SessionId): ProductSubagentWorkbenchInjected => ({
+    inject: (sessionId: SessionId): ProductSubagentWorkbenchInjected => {
+      const currentParentSessionId = String(sessionId)
+      const assertCurrentParent = (parentSessionId: string | SessionId): void => {
+        if (String(parentSessionId) !== currentParentSessionId) {
+          throw new Error('product-subagent-console: request does not belong to current session')
+        }
+      }
+      const assertCurrentParents = (parentSessionIds: readonly SessionId[]): void => {
+        if (parentSessionIds.length !== 1) {
+          throw new Error('product-subagent-console: exactly one current session is required')
+        }
+        assertCurrentParent(parentSessionIds[0] as SessionId)
+      }
+      const assertRequestActive = (signal: AbortSignal): void => {
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+      }
+      return ({
       async listSessions(parentSessionIds: readonly SessionId[], signal: AbortSignal) {
         const result = await connection.rpc.call(
           PRODUCT_SUBAGENT_CONSOLE_CHANNEL,
@@ -140,7 +249,136 @@ export function apply(ctx: ClientContext): void {
         if (!result.ok) throw new Error(`product-subagent-console RPC failed: ${result.error.code}`)
         return consoleSnapshotSchema.parse(result.value)
       },
+      async listFoundry(parentSessionIds: readonly SessionId[], signal: AbortSignal) {
+        assertCurrentParents(parentSessionIds)
+        const request = listFoundryRunsRequestSchema.parse({
+          parentSessionIds: parentSessionIds.map(String),
+        })
+        const value = await callPlanner(LIST_FOUNDRY_RUNS_ENDPOINT, request, signal)
+        return foundrySnapshotSchema.parse(value)
+      },
+      async watchFoundry(
+        parentSessionIds: readonly SessionId[],
+        hostInstanceId: string | undefined,
+        afterRevision: number,
+        signal: AbortSignal,
+      ) {
+        assertCurrentParents(parentSessionIds)
+        const request = watchFoundryRunsRequestSchema.parse({
+          parentSessionIds: parentSessionIds.map(String),
+          ...(hostInstanceId === undefined ? {} : { hostInstanceId }),
+          afterRevision,
+          timeoutMs: 25_000,
+        })
+        const value = await callPlanner(WATCH_FOUNDRY_RUNS_ENDPOINT, request, signal)
+        return foundrySnapshotSchema.parse(value)
+      },
+      async inspectRun(input: InspectRunRequest, signal: AbortSignal) {
+        const request = inspectRunRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(INSPECT_FOUNDRY_RUN_ENDPOINT, request, signal)
+        return inspectRunResultSchema.parse(value)
+      },
+      async askRun(
+        parentSessionId: SessionId,
+        input: InspectRunRequest,
+        question: string,
+        signal: AbortSignal,
+      ) {
+        if (parentSessionId !== sessionId || input.parentSessionId !== String(sessionId)) {
+          throw new Error('product-subagent-console: run question does not belong to current session')
+        }
+        const request = inspectRunRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const normalizedQuestion = question.trim()
+        if (normalizedQuestion.length < 1 || normalizedQuestion.length > 2_000) {
+          throw new Error('product-subagent-console: run question must contain 1-2000 characters')
+        }
+        const value = await callPlanner(INSPECT_FOUNDRY_RUN_ENDPOINT, request, signal)
+        const facts = inspectRunResultSchema.parse(value)
+        assertRequestActive(signal)
+        assertCurrentParent(request.parentSessionId)
+        const binding = sessions.binding(sessionId)
+        if (binding === undefined) throw new Error('product-subagent-console: current session is unavailable')
+        const english = t('locale.code') === 'en'
+        const packet = facts.facts.map(fact => ({
+          factId: fact.factId,
+          category: fact.category,
+          label: fact.label,
+          value: fact.value,
+          certainty: fact.certainty,
+          evidenceEventIds: fact.evidenceEventIds,
+          findingIds: fact.findingIds,
+          ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
+          ...(fact.attemptId === undefined ? {} : { attemptId: fact.attemptId }),
+        }))
+        const result = await binding.session.prompt([{
+          type: 'text',
+          text: (english ? [
+            `Question about Agent run ${request.runId}: ${normalizedQuestion}`,
+            `Foundry query: ${request.kind}; event cursor: ${String(facts.throughCursor)}; answer code: ${facts.answerCode}.`,
+            `Factual packet: ${JSON.stringify(packet)}`,
+            'Explain only what this packet supports. Cite factId/findingId/eventId. Label any additional interpretation as a hypothesis. Do not execute, retry, resume, cancel, or edit an Agent.',
+          ] : [
+            `关于 Agent 运行 ${request.runId} 的问题：${normalizedQuestion}`,
+            `Foundry 查询：${request.kind}；事件游标：${String(facts.throughCursor)}；答案代码：${facts.answerCode}。`,
+            `事实包：${JSON.stringify(packet)}`,
+            '只解释事实包能够支持的内容，并引用 factId/findingId/eventId；额外推测必须标为“假设”。不要执行、重试、恢复、取消或编辑任何 Agent。',
+          ]).join('\n'),
+        }], 'queue', signal)
+        if (!result.ok) throw new Error(`product-subagent-console prompt failed: ${result.error.code}`)
+        return facts
+      },
+      async exportRunCapsule(input: ExportRunCapsuleRequest, signal: AbortSignal) {
+        const request = exportRunCapsuleRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(EXPORT_RUN_CAPSULE_ENDPOINT, request, signal)
+        return exportRunCapsuleResultSchema.parse(value)
+      },
+      async previewRecipe(input: RecipeCandidateRequest, signal: AbortSignal) {
+        const request = recipeCandidateRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(PREVIEW_RECIPE_ENDPOINT, request, signal)
+        return recipeCandidateSchema.parse(value)
+      },
+      async exportRecipe(input: ExportRecipeRequest, signal: AbortSignal) {
+        const request = exportRecipeRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(EXPORT_RECIPE_ENDPOINT, request, signal)
+        return exportRecipeResultSchema.parse(value)
+      },
+      async instantiateRecipe(input: InstantiateRecipeRequest, signal: AbortSignal) {
+        const request = instantiateRecipeRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(INSTANTIATE_RECIPE_ENDPOINT, request, signal)
+        return instantiateRecipeResultSchema.parse(value)
+      },
+      async compareRuns(input: CompareRunsRequest, signal: AbortSignal) {
+        const request = compareRunsRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(COMPARE_FOUNDRY_RUNS_ENDPOINT, request, signal)
+        return runAdvisorResultSchema.parse(value)
+      },
+      async exportTelemetry(input: ExportTelemetryRequest, signal: AbortSignal) {
+        const request = exportTelemetryRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(EXPORT_TELEMETRY_ENDPOINT, request, signal)
+        return exportTelemetryResultSchema.parse(value)
+      },
+      async issueCancelControlGrant(input: IssueCancelGrantRequest, signal: AbortSignal) {
+        const request = issueCancelGrantRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(ISSUE_CANCEL_CONTROL_GRANT_ENDPOINT, request, signal)
+        return foundryControlGrantSchema.parse(value)
+      },
+      async executeCancelControl(input: ExecuteCancelControlRequest, signal: AbortSignal) {
+        const request = executeCancelControlRequestSchema.parse(input)
+        assertCurrentParent(request.parentSessionId)
+        const value = await callPlanner(EXECUTE_CANCEL_CONTROL_ENDPOINT, request, signal)
+        return executeCancelControlResultSchema.parse(value)
+      },
       async listPlans(parentSessionIds: readonly SessionId[], signal: AbortSignal) {
+        assertCurrentParents(parentSessionIds)
         const request = listPlansRequestSchema.parse({
           parentSessionIds: parentSessionIds.map(String),
         })
@@ -153,6 +391,7 @@ export function apply(ctx: ClientContext): void {
         afterRevision: number,
         signal: AbortSignal,
       ) {
+        assertCurrentParents(parentSessionIds)
         const request = watchPlansRequestSchema.parse({
           parentSessionIds: parentSessionIds.map(String),
           hostInstanceId,
@@ -202,6 +441,8 @@ export function apply(ctx: ClientContext): void {
           signal,
         )
         const capabilities = executionCapabilitySnapshotSchema.parse(capabilityValue)
+        assertRequestActive(signal)
+        assertCurrentParent(parentSessionId)
         const designToolName = capabilities.plannerTools?.design.find(name => capabilities.tools.includes(name))
         if (capabilities.scopeStatus !== 'available' || designToolName === undefined) {
           throw new Error('product-subagent-console: the plan design tool is unavailable in the current Agent scope')
@@ -246,6 +487,7 @@ export function apply(ctx: ClientContext): void {
         }
       },
       async listPlanExecutions(parentSessionIds: readonly SessionId[], signal: AbortSignal) {
+        assertCurrentParents(parentSessionIds)
         const request = listPlanExecutionsRequestSchema.parse({
           parentSessionIds: parentSessionIds.map(String),
         })
@@ -258,6 +500,7 @@ export function apply(ctx: ClientContext): void {
         afterRevision: number,
         signal: AbortSignal,
       ) {
+        assertCurrentParents(parentSessionIds)
         const request = watchPlanExecutionsRequestSchema.parse({
           parentSessionIds: parentSessionIds.map(String),
           ...(hostInstanceId === undefined ? {} : { hostInstanceId }),
@@ -266,11 +509,6 @@ export function apply(ctx: ClientContext): void {
         })
         const value = await callPlanner(WATCH_PLAN_EXECUTIONS_ENDPOINT, request, signal)
         return planExecutionRepositorySnapshotSchema.parse(value)
-      },
-      async cancelPlanExecution(input, signal: AbortSignal) {
-        const request = cancelPlanExecutionRequestSchema.parse(input)
-        const value = await callPlanner(CANCEL_PLAN_EXECUTION_ENDPOINT, request, signal)
-        return cancelPlanExecutionResultSchema.parse(value)
       },
       async requestPlanExecution(
         parentSessionId: SessionId,
@@ -286,6 +524,8 @@ export function apply(ctx: ClientContext): void {
         }
         const grantValue = await callPlanner(ISSUE_PLAN_EXECUTION_GRANT_ENDPOINT, request, signal)
         const grant = planExecutionGrantSchema.parse(grantValue)
+        assertRequestActive(signal)
+        assertCurrentParent(request.parentSessionId)
         const binding = sessions.binding(sessionId)
         if (binding === undefined) {
           throw new Error('product-subagent-console: current session is unavailable')
@@ -330,6 +570,7 @@ export function apply(ctx: ClientContext): void {
       },
       openChild(address: SubagentAddress) { sessions.openSubagent(address) },
       refreshNative(parentSessionId: SessionId) { return sessions.refreshSubagents(parentSessionId) },
-    }),
+      })
+    },
   }, SubagentWorkbenchView))
 }

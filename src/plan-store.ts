@@ -85,6 +85,59 @@ export class AgentPlanRepository {
     return () => { this.listeners.delete(listener) }
   }
 
+  /** Restore validated immutable revisions before the repository is exposed. */
+  restore(rawRevisions: readonly unknown[]): void {
+    if (this.records.size > 0 || this.revisionValue > 0) {
+      throw new Error('agent plan repository can only be restored while empty')
+    }
+    const revisions = rawRevisions.map(value => structuredClone(agentPlanRevisionSchema.parse(value)))
+    const grouped = new Map<string, AgentPlanRevision[]>()
+    for (const revision of revisions) {
+      const group = grouped.get(revision.planId) ?? []
+      group.push(revision)
+      grouped.set(revision.planId, group)
+    }
+    if (grouped.size > this.maxPlans) throw new Error('agent plan repository capacity reached')
+    const sessionCounts = new Map<string, number>()
+    const restored = new Map<string, PlanRecord>()
+    let totalBytes = 0
+    for (const [planId, group] of grouped) {
+      group.sort((left, right) => left.revision - right.revision)
+      if (group.length > this.maxRevisionsPerPlan) throw new Error('agent plan revision capacity reached')
+      const parentSessionId = group[0]?.parentSessionId
+      if (parentSessionId === undefined) continue
+      const sessionCount = (sessionCounts.get(parentSessionId) ?? 0) + 1
+      if (sessionCount > this.maxPlansPerSession) throw new Error('agent plan per-Session capacity reached')
+      sessionCounts.set(parentSessionId, sessionCount)
+      for (let index = 0; index < group.length; index += 1) {
+        let revision = group[index]
+        if (revision === undefined) continue
+        if (revision.planId !== planId || revision.parentSessionId !== parentSessionId) {
+          throw new Error('restored agent plan identity is inconsistent')
+        }
+        if (revision.revision !== index + 1) {
+          throw new Error('restored agent plan revisions must be contiguous')
+        }
+        if (revision.state === 'superseded' && index === group.length - 1) {
+          throw new Error('latest restored agent plan revision cannot be superseded')
+        }
+        // A crash can persist the new draft before the preceding draft's
+        // superseded transition. Repair only that conservative prefix gap;
+        // approved history and the latest revision remain untouched.
+        if (revision.state === 'draft' && index < group.length - 1) {
+          revision = agentPlanRevisionSchema.parse({ ...revision, state: 'superseded' })
+          group[index] = revision
+        }
+        totalBytes += encodedBytes(revision)
+      }
+      restored.set(planId, { parentSessionId, revisions: group })
+    }
+    if (totalBytes > this.maxTotalBytes) throw new Error('agent plan repository byte capacity reached')
+    for (const [planId, record] of restored) this.records.set(planId, record)
+    this.totalBytes = totalBytes
+    this.revisionValue = revisions.length === 0 ? 0 : 1
+  }
+
   /** Save a new draft revision using exact compare-and-swap semantics. */
   saveDraft(input: SavePlanDraftInput): AgentPlanRevision {
     const content = canonicalPlanContent(input.content)

@@ -33,17 +33,24 @@ vi.mock('../src/client/AgentPlanWorkbench.js', () => ({
   },
 }))
 
-vi.mock('../src/client/AgentPlanComparison.js', () => ({
-  AGENT_PLAN_COMPARISON_COPY_EN: {},
-  AGENT_PLAN_COMPARISON_COPY_ZH: {},
-  AgentPlanComparison: ({ plans, executionSnapshot }: {
-    readonly plans: readonly unknown[]
-    readonly executionSnapshot: { readonly executions: readonly unknown[] }
-  }) => createElement(
-    'div',
-    { 'data-testid': 'compare-mode' },
-    `${String(plans.length)} plans / ${String(executionSnapshot.executions.length)} executions`,
-  ),
+vi.mock('../src/client/AgentFoundryWorkbench.js', () => ({
+  AgentFoundryWorkbench: ({ mode, status, snapshot }: {
+    readonly mode: string
+    readonly status: string
+    readonly snapshot?: { readonly executions: readonly unknown[] }
+  }) => {
+    const [value, setValue] = useState('')
+    return createElement(
+      'div',
+      { 'data-testid': 'foundry-mode' },
+      createElement('span', {}, `${mode}:${status}:${String(snapshot?.executions.length ?? 0)}`),
+      createElement('input', {
+        'aria-label': 'foundry-value',
+        value,
+        onChange: (event: { currentTarget: { value: string } }) => { setValue(event.currentTarget.value) },
+      }),
+    )
+  },
 }))
 
 import { SubagentWorkbenchView } from '../src/client/SubagentWorkbenchView.js'
@@ -142,19 +149,46 @@ function props(owner = sessionId): SubagentWorkbenchProps {
       executions: [],
     })),
     watchPlanExecutions: vi.fn(async (_ids, _host, _revision, signal) => waitForAbort(signal)),
-    cancelPlanExecution: vi.fn(),
     requestPlanExecution: vi.fn(),
+    listFoundry: vi.fn(async () => ({
+      schemaVersion: 1,
+      hostInstanceId,
+      hostStartedAt: 1,
+      revision: 0,
+      eventCursor: 0,
+      capturedAt: 1,
+      durability: 'memory',
+      storageStatus: 'disabled',
+      projectionDigest: '0'.repeat(64),
+      adapterFacts: [],
+      plans: [],
+      executions: [],
+      events: [],
+      receipts: [],
+      reports: [],
+      recoveryProposals: [],
+    })),
+    watchFoundry: vi.fn(async (_ids, _host, _revision, signal) => waitForAbort(signal)),
+    askRun: vi.fn(),
+    exportRunCapsule: vi.fn(),
+    previewRecipe: vi.fn(),
+    exportRecipe: vi.fn(),
+    compareRuns: vi.fn(),
+    exportTelemetry: vi.fn(),
+    issueCancelControlGrant: vi.fn(),
+    executeCancelControl: vi.fn(),
   } as unknown as SubagentWorkbenchProps
 }
 
-describe('three-mode conversation workbench', () => {
-  it('switches Runtime, Plan, and Compare as accessible tabs', async () => {
+describe('four-mode conversation workbench', () => {
+  it('switches Live, Plan, Deviation, and Recovery as accessible tabs', async () => {
     const injected = props()
     render(createElement(SubagentWorkbenchView, injected))
 
-    const runtime = screen.getByRole('tab', { name: 'Runtime' })
+    const runtime = screen.getByRole('tab', { name: 'Live' })
     const planner = screen.getByRole('tab', { name: 'Plan' })
-    const compare = screen.getByRole('tab', { name: 'Compare' })
+    const deviation = screen.getByRole('tab', { name: 'Deviation' })
+    const recovery = screen.getByRole('tab', { name: 'Recovery' })
     expect(runtime.getAttribute('aria-selected')).toBe('true')
     expect(await screen.findByTestId('runtime-canvas')).toBeTruthy()
 
@@ -163,12 +197,18 @@ describe('three-mode conversation workbench', () => {
     expect(await screen.findByTestId('planner-mode')).toBeTruthy()
 
     fireEvent.keyDown(planner, { key: 'ArrowRight' })
-    expect(compare.getAttribute('aria-selected')).toBe('true')
+    expect(deviation.getAttribute('aria-selected')).toBe('true')
     await waitFor(() => {
-      expect(screen.getByTestId('compare-mode').textContent).toBe('0 plans / 0 executions')
+      expect(screen.getByTestId('foundry-mode').textContent).toContain('deviation:ready:0')
     })
-    expect(injected.listPlans).toHaveBeenCalledWith([sessionId], expect.any(AbortSignal))
-    expect(injected.listPlanExecutions).toHaveBeenCalledWith([sessionId], expect.any(AbortSignal))
+    expect(injected.listFoundry).toHaveBeenCalledWith([sessionId], expect.any(AbortSignal))
+
+    fireEvent.change(screen.getByLabelText('foundry-value'), { target: { value: 'paused investigation' } })
+
+    fireEvent.keyDown(deviation, { key: 'ArrowRight' })
+    expect(recovery.getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByTestId('foundry-mode').textContent).toContain('recovery:ready:0')
+    expect((screen.getByLabelText('foundry-value') as HTMLInputElement).value).toBe('paused investigation')
   })
 
   it('preserves a draft between modes but resets it when the owning Session changes', async () => {
@@ -177,7 +217,7 @@ describe('three-mode conversation workbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Plan' }))
     const input = await screen.findByLabelText('draft-value') as HTMLInputElement
     fireEvent.change(input, { target: { value: 'session A draft' } })
-    fireEvent.click(screen.getByRole('tab', { name: 'Compare' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Deviation' }))
     fireEvent.click(screen.getByRole('tab', { name: 'Plan' }))
     expect((screen.getByLabelText('draft-value') as HTMLInputElement).value).toBe('session A draft')
 

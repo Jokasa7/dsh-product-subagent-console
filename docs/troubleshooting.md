@@ -9,7 +9,7 @@ English · [简体中文](troubleshooting.zh.md)
 - Align DSH, the plugin, and Provider Bundles to the supported version family.
 - Restart the Web profile and refresh the page.
 
-## Runtime is empty
+## Live is empty
 
 - Confirm that the selected Agent Preset enables a compatible delegation tool.
 - Create a new conversation after changing a preset.
@@ -44,8 +44,9 @@ Warnings must be reviewed and accepted before approval. Editing the draft requir
 
 ## An approved plan does not execute
 
-- Confirm that the exact approved revision is selected in Compare.
-- Run preflight again if the DSH profile, Provider, tools, or presets changed after approval.
+- Confirm that the exact approved revision is selected in Plan.
+- Select **Review execution request**, then confirm the separate warning. One click intentionally does not start work.
+- If the DSH profile, Provider, tools, or presets changed after approval, create a new revision, save it, rerun preflight, and approve it.
 - Check Chat and Trajectory for the visible execution request and execution-tool call.
 - Confirm that the execution tool is still enabled in the current Agent Preset; create a new conversation after changing the preset.
 - Confirm that the selected Provider is installed, authenticated, and available.
@@ -62,9 +63,25 @@ Warnings must be reviewed and accepted before approval. Editing the draft requir
 
 Open Trajectory and check the Provider process or logs. If the Provider is no longer responsive, stop it through its normal control path. Restart the Web profile only if the lifecycle does not recover.
 
-## Cancellation stays pending
+## Cancellation is rejected or stays pending
 
-Cancellation is a request to the active Workflow and Provider. The execution remains active until DSH reports that its tasks have settled. Check Trajectory and Provider logs if the state does not change.
+- Cancellation works only from **Recovery** at the current live cursor and requires two clicks.
+- A newer event, expired grant, Host restart, terminal execution, or mismatched Session safely invalidates the request. Return to live, refresh the preview, and review the impact again.
+- A successfully requested cancellation remains active until DSH and the Provider report that every task has settled. Check Trajectory and Provider logs if the state does not change.
+
+## Deviation is stale or historical
+
+Select **Return live** above the timeline. Capsule, telemetry, and live control are intentionally disabled while the cursor is paused. If the page still reports stale facts, select **Retry**; do not treat the visible graph as current until the status returns to ready.
+
+## Recipe cannot be created
+
+A candidate requires at least three distinct executions that share the same canonical plan contract, capability digest, and verifier suite. Every selected run must have succeeded, contain the required authoritative verifier receipts, and have no open blocking finding. Permission enforcement is still rechecked when the candidate creates a new draft.
+
+## Foundry storage is degraded
+
+The page shows `disk/degraded` or `host-only/degraded` when the bounded journal cannot accept more durable facts or a disk write fails. Stop starting new executions, inspect available disk space and the Host log, then restart only after the storage problem is fixed. Existing facts remain bounded; the plugin never labels an interrupted run as successful.
+
+See [Data and Privacy](data-and-privacy.md) before disabling persistence or removing local Foundry data.
 
 ## The page disconnects
 
@@ -76,6 +93,6 @@ Align the plugin, Provider Bundles, and all DSH packages to the exact supported 
 
 ## Plans, execution history, or card positions disappear
 
-Plans and execution history are temporary for the current DSH Web process. Manually adjusted card positions are local to the current page and are not restored after a page restart.
+Foundry plan and execution facts persist by default, but manually adjusted card positions belong only to the current browser page. If facts disappear, check the storage status and confirm that the profile is using the same DSH home directory as before.
 
 If a problem remains reproducible, open a [GitHub Issue](https://github.com/Jokasa7/dsh-product-subagent-console/issues) with the DSH version, plugin version, Provider name, browser, and visible error. Remove credentials and private task content before posting.
