@@ -1,6 +1,7 @@
 name: Bug report
 description: Report a reproducible problem with the plugin
 title: "[Bug] "
+labels: ["bug", "triage"]
 body:
   - type: markdown
     attributes:
@@ -20,11 +21,48 @@ body:
     validations:
       required: true
   - type: input
+    id: install-source
+    attributes:
+      label: Installation source
+      description: Release version, public Git commit, or package source. Do not include authentication data.
+      placeholder: v0.9.0 Release
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: DSH surface
+      options:
+        - Web profile
+        - Windows Desktop
+        - Both
+    validations:
+      required: true
+  - type: input
     id: environment
     attributes:
       label: Environment
       description: Operating system, browser, and Provider when relevant.
       placeholder: Windows 11, Chrome, Codex Provider
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and Bundle version
+      description: Required only when the problem involves delegated or planned work. Do not include credentials or authentication configuration.
+      placeholder: Codex Provider, Bundle 0.1.1-rc.2
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Affected mode
+      multiple: true
+      options:
+        - Live
+        - Plan
+        - Deviation
+        - Recovery
+        - Installation or startup
     validations:
       required: true
   - type: textarea
@@ -50,11 +88,28 @@ body:
       label: Expected behavior
     validations:
       required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Reproduction frequency
+      options:
+        - Every time
+        - Intermittent
+        - Happened once
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: lifecycle
+    attributes:
+      label: Last visible lifecycle state
+      description: Report only the visible state and approximate duration. Do not paste Session, child, run, or task identifiers.
+      placeholder: The child remained in running for about 30 seconds before the UI stopped updating.
   - type: textarea
     id: diagnostics
     attributes:
       label: Relevant diagnostics
-      description: Add sanitized Trajectory, browser-console, or Provider output if it helps reproduce the issue.
+      description: Add only the smallest sanitized Trajectory, browser-console, or Provider excerpt needed to reproduce the issue. You may drag a reviewed screenshot or text file here.
       render: shell
   - type: checkboxes
     id: checks

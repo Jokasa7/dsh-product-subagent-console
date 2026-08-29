@@ -115,6 +115,8 @@ Restart the profile after removal. Existing local Foundry data is not deleted au
 
 Use [GitHub Issues](https://github.com/Jokasa7/dsh-product-subagent-console/issues) for reproducible bugs and feature requests. Report vulnerabilities through the private channel in [SECURITY.md](SECURITY.md).
 
+Contributions are welcome; see [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the supported workflow and public-data rules.
+
 ## License
 
 [MIT](LICENSE). Third-party notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,5 +1,5 @@
 import {
-  cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState,
+  cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useMemo, useRef, useState,
   type ChangeEvent, type ReactNode,
 } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
@@ -1316,7 +1316,7 @@ export function AgentPlanWorkbench({
     setExecutionPromptPending(false)
   }, [active])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     actionController.current?.abort()
     actionController.current = null
     setAction(null)
