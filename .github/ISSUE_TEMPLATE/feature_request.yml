@@ -1,6 +1,7 @@
 name: Feature request
 description: Suggest an improvement to Live, Plan, Deviation, Recovery, or setup
 title: "[Feature] "
+labels: ["enhancement", "triage"]
 body:
   - type: textarea
     id: use-case

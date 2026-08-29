@@ -115,6 +115,8 @@ dsh plugin remove dsh-product-subagent-console
 
 可在 [GitHub Issues](https://github.com/Jokasa7/dsh-product-subagent-console/issues) 提交可复现的问题和功能建议。安全问题请通过 [SECURITY.md](SECURITY.md) 中的私密渠道报告。
 
+欢迎参与贡献；支持的开发流程和公开数据规则见 [贡献指南](.github/CONTRIBUTING.zh.md)。
+
 ## 许可证
 
 [MIT](LICENSE)。第三方许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
