@@ -194,6 +194,20 @@ describe('AgentPlanRepository', () => {
     expect(listener).toHaveBeenCalledTimes(1)
   })
 
+  it('repairs a crash-prefix where a newer draft was persisted before the prior transition', () => {
+    const source = new AgentPlanRepository()
+    const first = source.saveDraft({
+      parentSessionId: 'parent-a', expectedRevision: 0, content: content('First'),
+    })
+    const second = source.saveDraft({
+      parentSessionId: 'parent-a', planId: first.planId, expectedRevision: 1, content: content('Second'),
+    })
+    const restored = new AgentPlanRepository()
+    restored.restore([first, second])
+    expect(restored.get('parent-a', first.planId, 1)?.state).toBe('superseded')
+    expect(restored.get('parent-a', first.planId, 2)?.state).toBe('draft')
+  })
+
   it('contains listener failures after committing a revision', () => {
     const onListenerError = vi.fn()
     const repository = new AgentPlanRepository(100, 50, 16 * 1024 * 1024, 20, onListenerError)

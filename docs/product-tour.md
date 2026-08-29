@@ -2,64 +2,80 @@
 
 English · [简体中文](product-tour.zh.md)
 
-These screenshots show the plugin in DSH Desktop as a plan moves from a reviewable draft into real execution. The example runs two read-only tasks in parallel, then passes both results to a downstream summary task.
+This tour follows one bounded multi-Agent job from design to reusable evidence. Everything stays inside the **Subagents** tab of the current DeepSeek Harness conversation.
 
-The latest bounded regression run produced three tasks, two execution batches, three real child conversations, and a final Workflow state of `succeeded` in 10 seconds. Actual time depends on the model, Provider, task scope, and workspace size.
+The screenshots below come from the Simplified Chinese DSH locale; the plugin follows the active interface language.
 
-## 1. Edit tasks and dependencies
+## 1. Turn a goal into a reviewable plan
 
-Select a card in **Plan** to inspect or edit its brief, assigned role, risk, expected output, completion criteria, resource claims, and dependency types. Dashed context edges pass upstream results to the downstream task.
+Open **Plan**, describe the result, and generate a draft. The canvas exposes roles, responsibilities, tasks, dependencies, Providers, tools, verifier contracts, and the shared budget before any child Agent starts.
 
-![Select a downstream task and inspect its two context dependencies](assets/agent-plan-en.jpg)
+![An editable Agent plan with task dependencies](assets/agent-plan-zh.jpg)
 
-Keep each task bounded: name the files or commands it may use, define the expected output, and include a clear stop condition. This prevents a small check from expanding into unnecessary repository-wide exploration.
+Select a task to tighten its brief, completion criteria, resource claims, effect type, and required verifiers. Save the exact revision and run preflight. Blocking capability, dependency, concurrency, or budget issues must be fixed before approval.
 
-## 2. Run preflight before approval
+Approval locks that revision and its capability digest. Starting the run is a separate, visible confirmation.
 
-Save the exact revision, then run preflight. A passing result names the backend and execution batches and enables approval for that revision.
+## 2. Follow authoritative delegation in Live
 
-![A passing preflight reports two parallel batches](assets/workflow-preflight-ready-zh.jpg)
+**Live** shows native child sessions and compatible Provider runs under their real parent. Each card summarizes the current responsibility and lifecycle; selecting it opens the detailed facts and native child-session action when available.
 
-Preflight blocks approval when parallel tasks claim overlapping write scopes, a budget cannot be enforced, or the current profile lacks a required capability. Edit the plan, save a new revision, and rerun preflight to continue.
+![The live parent-child task canvas](assets/agent-runtime-zh.jpg)
 
-![Preflight blocks a parallel write conflict and unsupported budget](assets/workflow-preflight-blocked-zh.jpg)
+Drag cards, pan, zoom, fit, or auto-arrange the canvas without changing execution. The view keeps active work easy to find even when a run has many branches.
 
-## 3. Follow real delegated work
+## 3. Reconstruct what actually happened
 
-Once execution begins, **Runtime** shows the current conversation and observed delegation branches. State and duration update as work proceeds. Select a card for details or open a native DSH child conversation.
+Open **Deviation** after execution begins. The Execution Twin maps approved plan tasks to actual attempts and preserves missing, unexpected, retried, cancelled, and completed work as separate facts.
 
-![Runtime canvas with delegated branches and selected task details](assets/agent-runtime-en.jpg)
+![Planned tasks mapped to actual attempts](assets/agent-compare-zh.jpg)
 
-Pan, zoom, fit the graph, or auto-arrange branches to keep larger runs readable.
+The timeline cursor can pause the view at an earlier event. While paused, the graph, selected node, Evidence Passport, and conformance findings are all reconstructed at that cursor instead of silently mixing in newer facts.
 
-## 4. Verify plan versus execution
+The Evidence Passport separates four questions:
 
-**Compare** connects tasks from the approved revision to the attempts recorded for that execution. In the bounded example, two upstream tasks complete in parallel and the downstream summary finishes afterward.
+- What did the approved plan require?
+- What Provider, model, attempt, and lifecycle did DSH actually report?
+- Which authoritative verifier receipts support the result?
+- What is the first provable divergence, if one exists?
 
-![Approved tasks mapped to three recorded execution attempts in a successful run](assets/workflow-compare-success-zh.jpg)
+## 4. Ask the run, with evidence attached
 
-Select an execution, planned task, or actual attempt to inspect state, Task ID, attempt number, Child ID, timing, and retry origin.
+Choose a factual query such as **Why it is running**, **First divergence**, **Recorded configuration**, **Cancel impact**, or **Evidence**. Add your own question and send it to the current conversation. Configuration facts come only from authoritative DSH events or route fields actually applied by the Workflow adapter; unavailable fields remain unknown.
 
-The regression also opened all three native child conversations and checked their tool traces: the README task read only `README.md`, the package task read only `package.json`, and the synthesis task called no tools. This verifies task boundaries rather than relying on a green final state alone.
+The plugin supplies a bounded fact packet with the exact Session, run, task, event cursor, event IDs, and receipt IDs. It does not ask the model to invent hidden progress or internal Agent state.
 
-## 5. Stop work that is no longer needed
+## 5. Preview recovery before control
 
-Request cancellation in **Compare** when a task is too broad, exceeds the expected duration, or is no longer needed. DSH remains authoritative for the final state, while the canvas preserves the recorded outcome of both published and not-yet-started tasks.
+**Recovery** classifies tasks that are affected, reusable, or blocked and proposes Retry or Fork. These proposals never execute automatically in v0.9.
 
-![A cancelled execution with cancelled planned tasks and attempts](assets/workflow-compare-cancelled-zh.jpg)
+Whole-run cancellation is the only live control currently exposed. It requires two explicit clicks, a short-lived grant bound to the current run and event cursor, and a final result recorded in the event ledger. If the run changes, the page is historical, the grant expires, or the host restarts, the request fails closed.
 
-## Try it yourself
+![Recovery impact preview with reusable tasks and guarded controls](assets/agent-recovery-zh.jpg)
 
-In a new conversation using a preset with the planner tool, enter:
+## 6. Carry evidence forward safely
+
+- **Run Capsule** downloads a bounded, redacted offline HTML report. Review it before sharing; objectives and task briefs are excluded unless explicitly requested by an API caller.
+- **Recipe** requires at least three exactly comparable, verifier-passing runs. A candidate records the plan contract, Provider requirements, permission uncertainty, verifier suite, and budget envelope, then exports as one reviewable ZIP.
+- **Create draft** binds only the new objective, runs current-environment preflight, and opens Plan. It never approves or executes automatically.
+- **Single vs multi-Agent advisor** makes no recommendation unless both groups have enough comparable, verified runs.
+- **OTLP JSON preview** is offline and disabled by default; no network exporter is enabled by this plugin.
+
+## A safe end-to-end test
+
+Start a new conversation with the planner tool enabled and enter:
 
 > Design a read-only three-task plan for this workspace. Task A reads only the first paragraph of README.md. Task B reads only the name and version fields from package.json. Run A and B in parallel. Task C uses only those two results to return a three-line summary. Each task must stop immediately after obtaining its requested result. Create the draft only; do not execute it.
 
 Then:
 
-1. Open **Subagents → Plan** and inspect the roles, tasks, and two context dependencies.
-2. Save the draft and run preflight.
-3. Approve the exact revision.
-4. Open **Compare**, select the approved revision, and request execution.
-5. Follow branches in **Runtime**, then return to **Compare** to inspect the final mappings.
+1. Review task boundaries and context dependencies in **Plan**.
+2. Save, preflight, and approve the exact revision.
+3. Confirm the separate execution request.
+4. Watch the real branches in **Live**.
+5. Pause the cursor in **Deviation** and inspect a task's Evidence Passport.
+6. Ask for the first divergence or evidence in the current conversation.
+7. Open **Recovery** and review the impact preview without sending control.
+8. Export a Capsule and inspect the local file before sharing it.
 
-See [Getting Started](getting-started.md) for installation and preset setup, and [Agent Planner](agent-planner.md) for every field and current execution limit.
+Installation and preset setup are in [Getting Started](getting-started.md). Field definitions and current execution boundaries are in [Agent Planner](agent-planner.md); Foundry evidence semantics are in [Agent Foundry](agent-foundry.md).

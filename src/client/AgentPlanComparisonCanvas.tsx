@@ -9,7 +9,7 @@ import {
   StateDot, type StateDotState,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
-  AgentPlanRevision, PlanAttemptStatus, PlanExecution, PlanRole, PlanRunBinding,
+  AgentPlanRevision, PlanAttemptStatus, PlanExecution, PlanExecutionStatus, PlanRole, PlanRunBinding,
 } from '../plan-types.js'
 import {
   buildPlanComparisonGraph, layoutPlanComparisonGraph,
@@ -40,6 +40,7 @@ export interface AgentPlanComparisonCanvasCopy {
   readonly binding: string
   readonly retry: string
   readonly dragHint: string
+  readonly statusLabels: Readonly<Record<PlanAttemptStatus | PlanExecutionStatus, string>>
 }
 
 export const PLAN_COMPARISON_CANVAS_COPY_ZH: AgentPlanComparisonCanvasCopy = {
@@ -64,6 +65,21 @@ export const PLAN_COMPARISON_CANVAS_COPY_ZH: AgentPlanComparisonCanvasCopy = {
   binding: '计划 / 实际映射',
   retry: '重试关系',
   dragHint: '拖动卡片只调整当前浏览视图；点击卡片查看权威快照详情。',
+  statusLabels: {
+    queued: '排队中',
+    starting: '正在启动',
+    running: '运行中',
+    waiting: '等待中',
+    stopping: '正在停止',
+    succeeded: '已成功',
+    partial: '部分完成',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    rejected: '已拒绝',
+    skipped: '已跳过',
+    unknown: '未知',
+  },
 }
 
 export const PLAN_COMPARISON_CANVAS_COPY_EN: AgentPlanComparisonCanvasCopy = {
@@ -88,6 +104,21 @@ export const PLAN_COMPARISON_CANVAS_COPY_EN: AgentPlanComparisonCanvasCopy = {
   binding: 'Plan / actual binding',
   retry: 'Retry relation',
   dragHint: 'Dragging only changes this browser view; click a card for authoritative snapshot details.',
+  statusLabels: {
+    queued: 'queued',
+    starting: 'starting',
+    running: 'running',
+    waiting: 'waiting',
+    stopping: 'stopping',
+    succeeded: 'succeeded',
+    partial: 'partial',
+    completed: 'completed',
+    failed: 'failed',
+    cancelled: 'cancelled',
+    rejected: 'rejected',
+    skipped: 'skipped',
+    unknown: 'unknown',
+  },
 }
 
 export interface AgentPlanComparisonCanvasProps {
@@ -139,6 +170,13 @@ function latestAttempt(attempts: readonly PlanRunBinding[]): PlanRunBinding | un
   ))[0]
 }
 
+function statusLabel(
+  status: PlanAttemptStatus | PlanExecutionStatus,
+  copy: AgentPlanComparisonCanvasCopy,
+): string {
+  return copy.statusLabels[status]
+}
+
 function ComparisonNodeCard({ data, selected }: NodeProps<ComparisonFlowNode>): ReactNode {
   const { node, execution, role, attempts, now, copy } = data
   const binding = node.binding
@@ -161,10 +199,10 @@ function ComparisonNodeCard({ data, selected }: NodeProps<ComparisonFlowNode>): 
       ? `${role?.name ?? node.task?.roleId ?? ''} · ${role?.transportProvider ?? ''}`
       : binding?.childId === undefined ? copy.noChild : `${copy.child} · ${binding.childId}`
   const status = isExecution
-    ? execution.status
+    ? statusLabel(execution.status, copy)
     : isTask
-      ? latest === undefined ? copy.noAttempt : `${String(attempts.length)} ${copy.attempts} · ${latest.status}`
-      : binding?.status ?? 'unknown'
+      ? latest === undefined ? copy.noAttempt : `${String(attempts.length)} ${copy.attempts} · ${statusLabel(latest.status, copy)}`
+      : statusLabel(binding?.status ?? 'unknown', copy)
   const elapsed = isTask
     ? undefined
     : isExecution
@@ -229,10 +267,10 @@ function flowNodes(
     const role = node.task === undefined ? undefined : roles.get(node.task.roleId)
     const attempts = node.taskId === undefined ? [] : attemptsByTask.get(node.taskId) ?? []
     const ariaLabel = node.kind === 'execution'
-      ? `${copy.execution} ${execution.status}`
+      ? `${copy.execution} ${statusLabel(execution.status, copy)}`
       : node.kind === 'plan-task'
         ? `${copy.plannedTask} ${node.task?.title ?? node.taskId ?? ''}`
-        : `${copy.actualAttempt} ${node.binding?.status ?? 'unknown'}`
+        : `${copy.actualAttempt} ${statusLabel(node.binding?.status ?? 'unknown', copy)}`
     return {
       id: node.id,
       type: 'plan-comparison',

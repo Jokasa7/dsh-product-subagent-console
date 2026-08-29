@@ -130,6 +130,15 @@ function capabilities(): ExecutionCapabilitySnapshot {
       tokens: 'advisory',
       cost: 'unsupported',
     },
+    contractSupport: {
+      reasoningEffort: 'unsupported',
+      verifiers: {
+        lifecycle: 'enforced',
+        schema: 'unsupported',
+        test: 'unsupported',
+        manual: 'unsupported',
+      },
+    },
     limits: { maxAgents: 32, maxConcurrent: 16 },
     experimentalAgentTeam: false,
   }
@@ -159,6 +168,15 @@ function injected(overrides: Partial<AgentPlanWorkbenchInjected> = {}): AgentPla
     approvePlan: vi.fn(async () => revision('approved')),
     getExecutionCapabilities: vi.fn(async () => capabilities()),
     requestPlanDesign: vi.fn(async () => {}),
+    requestPlanExecution: vi.fn(async request => ({
+      grantId: '00000000-0000-4000-8000-000000000123',
+      parentSessionId: request.parentSessionId,
+      planId: request.planId,
+      revision: request.revision,
+      capabilityDigest: 'capability-one',
+      executeToolName: 'execute_subagent_plan',
+      expiresAt: 60_000,
+    })),
     ...overrides,
   }
 }
@@ -224,6 +242,36 @@ describe('Agent plan workbench', () => {
       }), expect.any(AbortSignal))
     })
     expect(await screen.findByText('已保存修订 2。')).toBeTruthy()
+  })
+
+  it('locks draft fields and ignores a late successful save after Plan becomes inactive', async () => {
+    let requestSignal: AbortSignal | undefined
+    let resolveSave: ((value: AgentPlanRevision) => void) | undefined
+    const actions = injected({
+      savePlan: vi.fn((_request, signal) => {
+        requestSignal = signal
+        return new Promise<AgentPlanRevision>((resolve) => {
+          resolveSave = resolve
+        })
+      }),
+    })
+    const view = render(createElement(AgentPlanWorkbench, { sessionId, injected: actions, active: true }))
+    await screen.findByDisplayValue('Release review')
+    fireEvent.click(screen.getByRole('button', { name: 'select-frontend' }))
+    fireEvent.change(screen.getByLabelText('任务名称'), { target: { value: 'Deferred review' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存草案' }))
+
+    await waitFor(() => { expect(actions.savePlan).toHaveBeenCalledOnce() })
+    expect((screen.getByLabelText('任务名称') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: '正在保存…' }) as HTMLButtonElement).disabled).toBe(true)
+
+    view.rerender(createElement(AgentPlanWorkbench, { sessionId, injected: actions, active: false }))
+    await waitFor(() => { expect(requestSignal?.aborted).toBe(true) })
+    await act(async () => {
+      resolveSave?.({ ...revision(), revision: 2, updatedAt: 2_000 })
+      await Promise.resolve()
+    })
+    expect(screen.queryByText('已保存修订 2。')).toBeNull()
   })
 
   it('shows optional whole-plan budgets and lets users clear an unsupported retained value', async () => {
@@ -311,6 +359,84 @@ describe('Agent plan workbench', () => {
         acceptedWarningIds: ['advisory-model:frontend'],
       }, expect.any(AbortSignal))
     })
+  })
+
+  it('requires a second explicit click before sending an approved revision for execution', async () => {
+    const approved = revision('approved')
+    const actions = injected({ listPlans: vi.fn(async () => snapshot(approved)) })
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByDisplayValue('Release review')
+
+    fireEvent.click(screen.getByRole('button', { name: '检查执行请求' }))
+    expect(actions.requestPlanExecution).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert').textContent).toContain('一次性授权')
+
+    fireEvent.click(screen.getByRole('button', { name: '确认并发送执行请求' }))
+    await waitFor(() => {
+      expect(actions.requestPlanExecution).toHaveBeenCalledWith(sessionId, {
+        parentSessionId: String(sessionId),
+        planId,
+        revision: 1,
+      }, expect.any(AbortSignal))
+    })
+    expect(await screen.findByText(/执行请求已发送到当前对话/u)).toBeTruthy()
+    const pending = screen.getByRole('button', { name: '执行请求已发送' }) as HTMLButtonElement
+    expect(pending.disabled).toBe(true)
+    fireEvent.click(pending)
+    expect(actions.requestPlanExecution).toHaveBeenCalledOnce()
+  })
+
+  it('requires a new confirmation when a watched approved revision replaces the reviewed target', async () => {
+    const approved = revision('approved')
+    const next = { ...approved, revision: 2, updatedAt: 2_000 }
+    let resolveUpdate: ((value: PlanRepositorySnapshot) => void) | undefined
+    let watchCount = 0
+    const actions = injected({
+      listPlans: vi.fn(async () => snapshot(approved)),
+      watchPlans: vi.fn((_ids, _host, _revision, signal) => {
+        watchCount += 1
+        if (watchCount === 1) {
+          return new Promise<PlanRepositorySnapshot>(resolve => { resolveUpdate = resolve })
+        }
+        return pendingWatch(signal)
+      }),
+    })
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: actions }))
+    await screen.findByDisplayValue('Release review')
+    fireEvent.click(screen.getByRole('button', { name: '检查执行请求' }))
+    expect(screen.getByRole('button', { name: '确认并发送执行请求' })).toBeTruthy()
+
+    await act(async () => {
+      resolveUpdate?.({ ...snapshot(next), revision: 2, capturedAt: 2_100 })
+      await Promise.resolve()
+    })
+    await waitFor(() => { expect(screen.getByRole('option', { name: /r2/u })).toBeTruthy() })
+    const review = screen.getByRole('button', { name: '检查执行请求' })
+    fireEvent.click(review)
+    expect(actions.requestPlanExecution).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: '确认并发送执行请求' })).toBeTruthy()
+  })
+
+  it('clears staged execution confirmation when Plan is hidden and disables stale execution on watch failure', async () => {
+    const approved = revision('approved')
+    const actions = injected({ listPlans: vi.fn(async () => snapshot(approved)) })
+    const view = render(createElement(AgentPlanWorkbench, { sessionId, injected: actions, active: true }))
+    await screen.findByDisplayValue('Release review')
+    fireEvent.click(screen.getByRole('button', { name: '检查执行请求' }))
+    expect(screen.getByRole('button', { name: '确认并发送执行请求' })).toBeTruthy()
+
+    view.rerender(createElement(AgentPlanWorkbench, { sessionId, injected: actions, active: false }))
+    view.rerender(createElement(AgentPlanWorkbench, { sessionId, injected: actions, active: true }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '检查执行请求' })).toBeTruthy() })
+
+    const disconnected = injected({
+      listPlans: vi.fn(async () => snapshot(approved)),
+      watchPlans: vi.fn(async () => { throw new Error('disconnected') }),
+    })
+    view.unmount()
+    render(createElement(AgentPlanWorkbench, { sessionId, injected: disconnected, active: true }))
+    await screen.findByText('与方案服务的连接已中断；当前内容可能不是最新状态。')
+    expect((screen.getByRole('button', { name: '检查执行请求' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('adds, removes, and edits task dependencies through the selected-card inspector', async () => {

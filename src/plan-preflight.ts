@@ -254,6 +254,19 @@ export function preflightAgentPlan(
         { nodeIds: [role.roleId] },
       ))
     }
+    if (role.reasoningEffort !== undefined && role.reasoningEffort !== 'unknown') {
+      const support = capabilities.contractSupport.reasoningEffort
+      diagnostics.push(diagnostic(
+        support === 'enforced' ? 'info' : support === 'advisory' ? 'warning' : 'error',
+        `role.reasoning-effort-${support}`,
+        support === 'enforced'
+          ? `Reasoning effort for role "${role.name}" can be enforced.`
+          : support === 'advisory'
+            ? `Reasoning effort for role "${role.name}" is advisory.`
+            : `The selected adapter cannot enforce reasoning effort for role "${role.name}".`,
+        { nodeIds: [role.roleId], support },
+      ))
+    }
     if (role.toolPolicy.mode === 'allowlist') {
       if (capabilities.scopeStatus === 'unavailable') {
         diagnostics.push(diagnostic(
@@ -362,6 +375,22 @@ export function preflightAgentPlan(
           nodeIds: [task.taskId],
           fixHint: 'Remove the task budget hint or use an adapter that explicitly supports per-task budgets.',
           support: 'unsupported',
+        },
+      ))
+    }
+    for (const verifier of task.verifiers ?? []) {
+      const support = capabilities.contractSupport.verifiers[verifier.kind]
+      if (support === 'enforced') continue
+      diagnostics.push(diagnostic(
+        verifier.required || support === 'unsupported' ? 'error' : 'warning',
+        `task.verifier-${verifier.kind}-${support}`,
+        `Verifier "${verifier.verifierId}" (${verifier.kind}) cannot be enforced by the selected adapter.`,
+        {
+          nodeIds: [task.taskId],
+          fixHint: verifier.required
+            ? 'Use a lifecycle verifier or make this verifier optional until a matching verifier adapter is installed.'
+            : 'Remove the optional verifier if it is not useful as documentation.',
+          support,
         },
       ))
     }

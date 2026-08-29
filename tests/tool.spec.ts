@@ -107,7 +107,7 @@ async function harness(config: ServiceConfig = {}, withJobs = false): Promise<{
   await ctx.plugin(SubagentRuntime).await()
   await ctx.plugin(FakeConnectionService).await()
   if (withJobs) await ctx.plugin(FakeJobsService).await()
-  await ctx.plugin(ProductSubagentConsoleService, config).await()
+  await ctx.plugin(ProductSubagentConsoleService, { foundryStorage: false, ...config }).await()
   return {
     ctx,
     service: ctx.productSubagentConsole,
@@ -296,7 +296,7 @@ describe('product-subagent-console owned delegation tool', () => {
     await ctxDisabled.plugin(ToolRuntime).await()
     await ctxDisabled.plugin(SubagentRuntime).await()
     await ctxDisabled.plugin(FakeConnectionService).await()
-    await ctxDisabled.plugin(ProductSubagentConsoleService).await()
+    await ctxDisabled.plugin(ProductSubagentConsoleService, { foundryStorage: false }).await()
     const disabledProvider = new ControlledProvider('disabled-background')
     ctxDisabled.subagents.registerProvider(disabledProvider)
     await ctxDisabled.plugin(ProductSubagentTool, {
@@ -438,6 +438,9 @@ describe('product-subagent-console Agent plan design tool', () => {
       }],
     })
     expect(service.planSnapshot(['other-parent']).plans).toEqual([])
+    expect(service.foundrySnapshot(['plan-parent']).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'plan-saved', authority: 'model-claim' }),
+    ]))
   })
 
   it('requires the exact existing revision and a calling Agent', async () => {

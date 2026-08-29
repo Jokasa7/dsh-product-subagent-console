@@ -2,6 +2,32 @@
 
 All notable user-visible changes are documented here.
 
+## [0.9.0] - 2026-08-28
+
+### Added
+
+- Four connected Subagents modes: Live, Plan, Deviation, and Recovery.
+- An event-backed Execution Twin with a historical timeline, Evidence Passport, verifier receipts, conformance findings, and first-divergence detection.
+- Structured **Ask this run** queries that attach bounded Session, run, task, cursor, event, and receipt references to the current conversation.
+- A two-step execution confirmation and a separate two-step whole-run cancellation grant bound to the exact live facts.
+- Redacted offline Run Capsules with integrity checks, closed evidence references, deterministic size limits, and no network dependency.
+- Evidence-gated Recipe candidates from at least three comparable verifier-passing runs, draft instantiation with current-environment preflight, and a single ZIP export containing `recipe.json`, `SKILL.md`, and checksums.
+- A conservative single-Agent versus multi-Agent advisor that refuses to make a performance claim when evidence is insufficient.
+- Optional offline OTLP JSON preview, disabled by default.
+- Bounded local Foundry persistence with hash-chain verification, restart reconciliation, corruption quarantine, and visible degraded storage state.
+
+### Changed
+
+- Approved plan execution now requires an explicit review and confirmation and rejects stale capabilities or duplicate active starts.
+- Recovery shows affected, completed-and-reusable, and blocked tasks before control; Retry and Fork remain non-executing proposals, and task-level cancellation is unavailable.
+- Hidden Foundry views abort stale operations and disable control until current facts have reloaded.
+- Plans, executions, events, receipts, findings, control outcomes, Recipes, and Capsules use stricter versioned schemas and bounded inputs.
+
+### Compatibility
+
+- DeepSeek Harness `0.1.1-rc.2`.
+- Node.js `^22.19.0` or `>=24.0.0`.
+
 ## [0.4.0-alpha.2] - 2026-08-23
 
 ### Changed
@@ -38,5 +64,6 @@ All notable user-visible changes are documented here.
 - DeepSeek Harness `0.1.1-rc.2`.
 - Node.js `^22.19.0` or `>=24.0.0`.
 
+[0.9.0]: https://github.com/Jokasa7/dsh-product-subagent-console/releases/tag/v0.9.0
 [0.4.0-alpha.2]: https://github.com/Jokasa7/dsh-product-subagent-console/releases/tag/v0.4.0-alpha.2
 [0.4.0-alpha.1]: https://github.com/Jokasa7/dsh-product-subagent-console/releases/tag/v0.4.0-alpha.1

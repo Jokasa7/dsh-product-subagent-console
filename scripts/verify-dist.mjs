@@ -7,9 +7,14 @@ import { assertPublicTextFile, isPublicTextPath } from './public-text-policy.mjs
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const libRoot = resolve(root, 'lib')
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+const versionSource = readFileSync(resolve(root, 'src/version.ts'), 'utf8')
+const productVersion = versionSource.match(/PRODUCT_VERSION\s*=\s*['"]([^'"]+)['"]/u)?.[1]
 
 if (manifest.name !== 'dsh-product-subagent-console') {
   throw new Error(`refusing to verify an unexpected package: ${String(manifest.name)}`)
+}
+if (productVersion === undefined || productVersion !== manifest.version) {
+  throw new Error(`package version ${String(manifest.version)} does not match PRODUCT_VERSION ${String(productVersion)}`)
 }
 
 const required = [

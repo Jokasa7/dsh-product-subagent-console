@@ -127,7 +127,7 @@ describe('Web Bundle Workflow Host-plane compatibility', () => {
     await ctx.plugin(SubagentRuntime).await()
     await ctx.plugin(FakeConnectionService).await()
     await ctx.plugin(WorkerThreadWorkflowEngine, { provider: 'spawn' }).await()
-    await ctx.plugin(ProductSubagentConsoleService).await()
+    await ctx.plugin(ProductSubagentConsoleService, { foundryStorage: false }).await()
 
     expect(ctx.get('workflowEngine')).toBeInstanceOf(WorkerThreadWorkflowEngine)
     await expect(ctx.productSubagentConsole.executionCapabilities('fixture-parent'))

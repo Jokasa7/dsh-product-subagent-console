@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   planExecutionSchema,
+  planRunBindingSchema,
   type AgentPlanRevision,
   type PlanAttemptStatus,
   type PlanExecution,
@@ -65,6 +66,7 @@ export function isTerminalPlanAttemptStatus(status: PlanAttemptStatus): boolean 
  */
 export class PlanExecutionTracker {
   private current: PlanExecution
+  private readonly plannedTaskIds: ReadonlySet<string>
   private readonly listeners = new Set<(snapshot: PlanExecution) => void>()
 
   constructor(
@@ -75,6 +77,7 @@ export class PlanExecutionTracker {
     private readonly onListenerError: (error: unknown) => void = () => {},
   ) {
     const createdAt = this.now()
+    this.plannedTaskIds = new Set(plan.tasks.map(task => task.taskId))
     this.current = planExecutionSchema.parse({
       executionId,
       planId: plan.planId,
@@ -85,15 +88,9 @@ export class PlanExecutionTracker {
       status: 'queued',
       cancellationRequested: false,
       createdAt,
-      bindings: plan.tasks.map(task => ({
-        planId: plan.planId,
-        planRevision: plan.revision,
-        executionId,
-        taskId: task.taskId,
-        attemptId: randomUUID(),
-        attemptNumber: 1,
-        status: 'queued',
-      })),
+      // A planned task is not an actual attempt. Bindings materialize only
+      // after Workflow publishes a task Agent or a trusted terminal summary.
+      bindings: [],
     })
   }
 
@@ -124,10 +121,12 @@ export class PlanExecutionTracker {
   }
 
   markAttemptRunning(taskId: string, data: AttemptStartData): void {
-    this.updateBinding(taskId, (binding) => {
-      if (isTerminalPlanAttemptStatus(binding.status)) return binding
+    const binding = this.bindingFor(taskId, data)
+      ?? this.materializeBinding(taskId, 'starting', data)
+    this.updateBinding(binding.attemptId, (current) => {
+      if (isTerminalPlanAttemptStatus(current.status)) return current
       return {
-        ...binding,
+        ...current,
         status: 'running',
         workflowSeq: data.workflowSeq,
         childId: data.childId,
@@ -141,18 +140,26 @@ export class PlanExecutionTracker {
     status: AttemptTerminalStatus,
     data: Partial<AttemptStartData> = {},
     at: number = this.now(),
+    beforeCommit?: (binding: PlanRunBinding) => void,
   ): void {
-    this.updateBinding(taskId, (binding) => {
-      if (isTerminalPlanAttemptStatus(binding.status)) return binding
-      return {
-        ...binding,
-        status,
-        ...data.workflowSeq === undefined ? {} : { workflowSeq: data.workflowSeq },
-        ...data.childId === undefined ? {} : { childId: data.childId },
-        ...binding.startedAt === undefined && status !== 'skipped' ? { startedAt: data.at ?? at } : {},
-        finishedAt: at,
-      }
+    let binding = this.bindingFor(taskId, data)
+    if (binding === undefined) {
+      // A skipped plan slot never became an actual attempt.
+      if (status === 'skipped') return
+      binding = this.materializeBinding(taskId, 'starting', data)
+    }
+    const current = this.current.bindings.find(candidate => candidate.attemptId === binding.attemptId)
+    if (current === undefined || isTerminalPlanAttemptStatus(current.status)) return
+    const next = planRunBindingSchema.parse({
+      ...current,
+      status,
+      ...data.workflowSeq === undefined ? {} : { workflowSeq: data.workflowSeq },
+      ...data.childId === undefined ? {} : { childId: data.childId },
+      ...current.startedAt === undefined && status !== 'skipped' ? { startedAt: data.at ?? at } : {},
+      finishedAt: at,
     })
+    beforeCommit?.(structuredClone(next))
+    this.updateBinding(binding.attemptId, () => next)
   }
 
   /** Applies the fixed script's output-only status summary when an event was unavailable. */
@@ -173,13 +180,48 @@ export class PlanExecutionTracker {
 
   deriveCompletionStatus(): Extract<PlanExecutionStatus, 'succeeded' | 'partial' | 'failed'> {
     const statuses = this.current.bindings.map(binding => binding.status)
-    if (statuses.length > 0 && statuses.every(status => status === 'completed')) return 'succeeded'
+    if (
+      statuses.length === this.plannedTaskIds.size
+      && statuses.length > 0
+      && statuses.every(status => status === 'completed')
+    ) return 'succeeded'
     if (statuses.some(status => status === 'completed')) return 'partial'
     return 'failed'
   }
 
-  private updateBinding(taskId: string, update: (binding: PlanRunBinding) => PlanRunBinding): void {
-    const index = this.current.bindings.findIndex(binding => binding.taskId === taskId)
+  private bindingFor(taskId: string, data: Partial<AttemptStartData>): PlanRunBinding | undefined {
+    return this.current.bindings.findLast(binding => (
+      binding.taskId === taskId
+      && (data.childId === undefined || binding.childId === undefined || binding.childId === data.childId)
+      && (data.workflowSeq === undefined || binding.workflowSeq === undefined || binding.workflowSeq === data.workflowSeq)
+    ))
+  }
+
+  private materializeBinding(
+    taskId: string,
+    status: PlanAttemptStatus,
+    data: Partial<AttemptStartData>,
+  ): PlanRunBinding {
+    if (!this.plannedTaskIds.has(taskId)) throw new Error(`attempt task ${taskId} is absent from the approved plan`)
+    const previous = this.current.bindings.filter(binding => binding.taskId === taskId)
+    const binding = planRunBindingSchema.parse({
+      planId: this.current.planId,
+      planRevision: this.current.planRevision,
+      executionId: this.current.executionId,
+      taskId,
+      attemptId: randomUUID(),
+      attemptNumber: previous.length + 1,
+      status,
+      ...data.workflowSeq === undefined ? {} : { workflowSeq: data.workflowSeq },
+      ...data.childId === undefined ? {} : { childId: data.childId },
+      ...data.at === undefined ? {} : { startedAt: data.at },
+    })
+    this.replace({ ...this.current, bindings: [...this.current.bindings, binding] })
+    return binding
+  }
+
+  private updateBinding(attemptId: string, update: (binding: PlanRunBinding) => PlanRunBinding): void {
+    const index = this.current.bindings.findIndex(binding => binding.attemptId === attemptId)
     if (index < 0) return
     const previous = this.current.bindings[index]
     if (previous === undefined) return

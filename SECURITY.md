@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest published release is supported. This project is currently an alpha preview and may receive breaking updates.
+Only the latest published release is supported. Compatibility changes are documented in the changelog and release notes.
 
 ## Reporting a vulnerability
 

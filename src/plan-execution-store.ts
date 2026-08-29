@@ -3,6 +3,7 @@ import {
   type PlanExecution,
 } from './plan-types.js'
 import { isTerminalPlanExecutionStatus } from './planner-execution.js'
+import { planExecutionTransitionError } from './plan-execution-transition.js'
 
 export class PlanExecutionOwnershipError extends Error {
   constructor() {
@@ -59,9 +60,43 @@ export class PlanExecutionSnapshotRepository {
   get revision(): number { return this.revisionValue }
   get size(): number { return this.records.size }
 
+  /**
+   * Fail before a Workflow is started when a new execution could not be
+   * inserted. The following start + initial upsert are synchronous, so this
+   * check is also the repository capacity reservation boundary for the Host.
+   */
+  assertCanInsert(): void {
+    if (this.records.size < this.maxExecutions) return
+    if ([...this.records.values()].some(record => isTerminalPlanExecutionStatus(record.execution.status))) return
+    throw new PlanExecutionCapacityError()
+  }
+
   subscribe(listener: (revision: number) => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
+  }
+
+  /** Restore the latest durable snapshot for each execution before serving RPCs. */
+  restore(rawExecutions: readonly unknown[]): void {
+    if (this.records.size > 0 || this.revisionValue > 0) {
+      throw new Error('plan execution repository can only be restored while empty')
+    }
+    if (rawExecutions.length > this.maxExecutions) {
+      throw new PlanExecutionCapacityError()
+    }
+    const restored = new Map<string, ExecutionRecord>()
+    for (const rawExecution of rawExecutions) {
+      const execution = structuredClone(planExecutionSchema.parse(rawExecution))
+      if (restored.has(execution.executionId)) {
+        throw new PlanExecutionIdentityError('duplicate restored plan execution identity')
+      }
+      restored.set(execution.executionId, {
+        execution,
+        encoded: JSON.stringify(execution),
+      })
+    }
+    for (const [executionId, record] of restored) this.records.set(executionId, record)
+    this.revisionValue = rawExecutions.length === 0 ? 0 : 1
   }
 
   /**
@@ -78,6 +113,8 @@ export class PlanExecutionSnapshotRepository {
       if (isTerminalPlanExecutionStatus(previous.execution.status)) {
         throw new PlanExecutionIdentityError('a terminal plan execution snapshot is immutable')
       }
+      const transitionError = planExecutionTransitionError(previous.execution, execution)
+      if (transitionError !== undefined) throw new PlanExecutionIdentityError(transitionError)
       this.records.set(execution.executionId, { execution, encoded })
       this.changed()
       return structuredClone(execution)
@@ -129,20 +166,6 @@ export class PlanExecutionSnapshotRepository {
       || previous.createdAt !== next.createdAt
     ) {
       throw new PlanExecutionIdentityError('immutable plan execution identity fields changed')
-    }
-    const nextAttempts = new Map(next.bindings.map(binding => [binding.attemptId, binding] as const))
-    for (const before of previous.bindings) {
-      const binding = nextAttempts.get(before.attemptId)
-      if (
-        binding === undefined
-        || before.taskId !== binding.taskId
-        || before.attemptNumber !== binding.attemptNumber
-        || before.planId !== binding.planId
-        || before.planRevision !== binding.planRevision
-        || before.executionId !== binding.executionId
-      ) {
-        throw new PlanExecutionIdentityError('an existing plan execution attempt identity changed or disappeared')
-      }
     }
   }
 
