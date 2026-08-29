@@ -344,9 +344,10 @@ describe('Agent plan workbench', () => {
     await screen.findByDisplayValue('Release review')
 
     fireEvent.click(screen.getByRole('button', { name: '运行预检' }))
-    const approve = await screen.findByRole('button', { name: '批准此修订' })
+    const acceptWarning = await screen.findByLabelText('我已阅读并接受此警告')
+    const approve = screen.getByRole('button', { name: '批准此修订' })
     expect((approve as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByLabelText('我已阅读并接受此警告'))
+    fireEvent.click(acceptWarning)
     expect((approve as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(approve)
 
